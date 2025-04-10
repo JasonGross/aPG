@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ask Paul Graham</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/style.css">
+    <script>
+        // Minimal Tailwind config (optional, can customize fonts etc.)
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        // Match PG's site or use a clean default
+                        sans: ['Inter', 'sans-serif'],
+                        // serif: ['Georgia', 'serif'], // Example if using serif
+                    },
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-white text-gray-800 font-sans antialiased">
+    <div class="container mx-auto px-4 py-8 max-w-3xl">
+
+        <header class="mb-8">
+            <h1 class="text-3xl font-semibold text-gray-900">Ask Paul Graham</h1>
+        </header>
+
+        <section class="mb-8 p-4 border border-gray-200 rounded-md bg-gray-50">
+            <form id="prompt-form">
+                <label for="prompt-input" class="block text-sm font-medium text-gray-700 mb-1">
+                    Ask Paul Graham about:
+                </label>
+                <div class="flex items-center space-x-2">
+                    <input
+                        type="text"
+                        id="prompt-input"
+                        name="prompt"
+                        maxlength="70"
+                        required
+                        placeholder="e.g., starting a startup, Lisp, Y Combinator..."
+                        class="flex-grow px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-orange-500 focus:border-orange-500 sm:text-sm"
+                    >
+                    <button
+                        type="submit"
+                        id="submit-button"
+                        class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        Generate Essay
+                    </button>
+                </div>
+                 <p id="char-count" class="text-xs text-gray-500 mt-1 text-right">0 / 70 characters</p>
+            </form>
+        </section>
+
+        <section id="response-section" class="mb-8 min-h-[100px]">
+             <h2 class="text-xl font-semibold text-gray-800 mb-2">Essay:</h2>
+             <div id="loading-indicator" class="hidden text-gray-500">Generating...</div>
+             <div id="error-message" class="hidden text-red-600 bg-red-100 border border-red-300 p-3 rounded-md"></div>
+             <div id="response-output" class="prose prose-sm sm:prose lg:prose-lg xl:prose-xl max-w-none text-gray-700 leading-relaxed">
+                 </div>
+        </section>
+
+        <section>
+            <h2 class="text-xl font-semibold text-gray-800 mb-3">Past Essays</h2>
+            <div class="mb-3 text-sm">
+                Sort by:
+                <button data-sort="time" data-order="desc" class="sort-button text-orange-600 hover:underline focus:outline-none active">Recent</button> |
+                <button data-sort="views" data-order="desc" class="sort-button text-orange-600 hover:underline focus:outline-none">Popular</button> |
+                <button data-sort="alpha" data-order="asc" class="sort-button text-orange-600 hover:underline focus:outline-none">A-Z</button>
+            </div>
+            <ul id="essays-list" class="list-disc pl-5 space-y-1 text-gray-700">
+                <li class="text-gray-400">Loading essays...</li>
+            </ul>
+        </section>
+
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

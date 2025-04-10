@@ -1,6 +1,8 @@
-faicons
-shiny
-shinywidgets
-plotly
-pandas
-ridgeplot
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+supabase>=1.0.0,<2.0.0
+# httpx is usually installed as a dependency of fastapi or supabase, but good to have explicitly if needed elsewhere
+httpx>=0.24.0
+python-dotenv>=1.0.0
+jinja2>=3.0.0 # For templating
+anthropic>=0.20.0 # Added Anthropic client library
