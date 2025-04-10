@@ -1,11 +1,12 @@
 ---
-title: Shiny for Python template
+title: APG
 emoji: 🌍
 colorFrom: yellow
 colorTo: indigo
 sdk: docker
 pinned: false
 license: mit
+short_description: Ask for a Paul Graham essay on any topic
 ---
 
 This is a templated Space for [Shiny for Python](https://shiny.rstudio.com/py/). 
