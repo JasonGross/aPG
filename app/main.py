@@ -28,7 +28,7 @@ SUPABASE_SERVICE_KEY = os.getenv(
     "SUPABASE_SERVICE_KEY"
 )  # Use service key for backend operations
 # ANTHROPIC_API_KEY is the standard env var, but we use LLM_API_KEY from previous steps
-ANTHROPIC_API_KEY = os.getenv("LLM_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # LLM_API_ENDPOINT is not needed when using the official client library
 
 # --- Initialize Supabase Client ---
