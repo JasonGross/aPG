@@ -1,0 +1,52 @@
+# pyproject.toml
+
+[build-system]
+# Specifies the build backend (standard for many projects)
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# --- Core Project Metadata ---
+name = "ask_paul_graham"
+version = "0.1.0"
+description = "A web app to generate Paul Graham style essays using an LLM, with response storage."
+readme = "README.md" # Assumes you have or will create a README file
+requires-python = ">=3.9" # Based on the Python version used in Dockerfile/dev environment
+license = { text = "MIT" } # Or choose another license, e.g., "Apache-2.0"
+authors = [
+  { name = "Jason Gross", email = "jasongross9@gmail.com" }, # Optional: Add your details
+]
+keywords = ["fastapi", "llm", "paul graham", "anthropic", "supabase", "web app"] # Optional
+
+# --- Dependencies ---
+# List runtime dependencies required for the application to run.
+# Versions are based on previous requirements.txt/imports. Adjust as needed.
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0", # Explicitly included for direct usage if needed
+    "python-dotenv>=1.0.0", # Often used for local development environment variables
+    "jinja2>=3.0.0", # Anthropic client library
+    "python-multipart>=0.0.20",
+    "anthropic>=0.49.0",
+    "httpx>=0.28.1",
+    "supabase>=2.15.0",
+]
+
+# --- Optional: Project URLs ---
+# [project.urls]
+# "Homepage" = "https://github.com/yourusername/ask_paul_graham" # Example
+# "Bug Tracker" = "https://github.com/yourusername/ask_paul_graham/issues" # Example
+
+# --- Optional: Entry Points / Scripts ---
+# If you wanted to define command-line scripts:
+# [project.scripts]
+# ask-pg = "app.main:app" # Example, depends on how you structure/run
+
+# --- Optional: Development Dependencies ---
+# Example: Add linters, formatters, testing tools here
+# [project.optional-dependencies]
+# dev = [
+#     "pytest",
+#     "ruff",
+#     "mypy",
+# ]

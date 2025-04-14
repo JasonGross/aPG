@@ -1,11 +1,12 @@
 import os
 import asyncio
 import logging
+from typing import Optional  # Import Optional for type hinting
 from fastapi import FastAPI, Request, HTTPException, Form
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from supabase import create_client, Client
+from supabase.client import Client, create_client  # Correct import path
 from dotenv import load_dotenv
 import json
 from pydantic import BaseModel
@@ -25,35 +26,37 @@ load_dotenv()
 # --- Configuration ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-ANTHROPIC_API_KEY = os.getenv("LLM_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 # --- Initialize Supabase Client ---
+supabase: Optional[Client] = None  # Use Optional for type hint
 try:
     if SUPABASE_URL and SUPABASE_SERVICE_KEY:
-        supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         logger.info("Supabase client initialized successfully.")
     else:
         logger.warning(
             "Supabase URL or Key not found. Database functionality disabled."
         )
-        supabase = None
+        # supabase is already None
 except Exception as e:
     logger.exception("Error initializing Supabase client", exc_info=e)
-    supabase = None
+    supabase = None  # Ensure supabase is None on exception
 
 # --- Initialize Anthropic Client ---
+anthropic_client: Optional[AsyncAnthropic] = None  # Use Optional for type hint
 try:
     if ANTHROPIC_API_KEY:
         anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         logger.info("Anthropic client initialized successfully.")
     else:
         logger.warning(
-            "Anthropic API Key (LLM_API_KEY) not found. LLM functionality disabled."
+            "Anthropic API Key (ANTHROPIC_API_KEY) not found. LLM functionality disabled."
         )
-        anthropic_client = None
+        # anthropic_client is already None
 except Exception as e:
     logger.exception("Error initializing Anthropic client", exc_info=e)
-    anthropic_client = None
+    anthropic_client = None  # Ensure anthropic_client is None on exception
 
 # --- Initialize FastAPI App ---
 app = FastAPI()
@@ -107,11 +110,15 @@ async def get_llm_stream(
                     yield event.delta.text
         logger.info(f"Successfully completed LLM stream from model: '{model_name}'")
     except APIError as e:
+        # Note: Accessing e.status_code might still be problematic depending on the
+        # exact version of the anthropic library and the error type.
+        # We'll log the whole error for now. A more robust solution might involve
+        # checking the error type or attributes more carefully.
         logger.error(
-            f"Anthropic API Error status={e.status_code} model='{model_name}' message='{e.message}'",
+            f"Anthropic API Error model='{model_name}' message='{e.message}' Error Details: {e}",
             exc_info=False,
         )
-        yield f"data: {json.dumps({'error': f'LLM API Error: {e.status_code} - {e.message}'})}\n\n"
+        yield f"data: {json.dumps({'error': f'LLM API Error: {e.message}'})}\n\n"  # Avoid potentially missing attributes
     except Exception as e:
         logger.exception(
             f"Error calling Anthropic API model: '{model_name}'", exc_info=e
@@ -232,7 +239,8 @@ async def read_root(request: Request):
     if not os.path.exists(template_path):
         logger.error(f"Template file not found at {template_path}")
         raise HTTPException(status_code=404, detail="index.html not found")
-    logger.info(f"Serving root page request from {request.client.host}")
+    client_host = request.client.host if request.client else "unknown"  # Safe access
+    logger.info(f"Serving root page request from {client_host}")
     return templates.TemplateResponse("index.html", {"request": request})
 
 
@@ -456,13 +464,18 @@ async def get_essays(sort_by: str = "time", order: str = "desc"):
     valid_order = {"asc": True, "desc": False}
     sort_column = valid_sort_by.get(sort_by, "created_at")
     ascending = valid_order.get(order, False)
+    descending = not ascending  # Calculate descending flag
 
     try:
         # Query the `prompts` table
         response = (
             supabase.table("prompts")
-            .select("short_description, created_at, view_count", count="exact")
-            .order(sort_column, ascending=ascending)
+            .select(
+                "short_description, created_at, view_count", count="exact"
+            )  # Keep count="exact" for now, monitor Supabase docs if needed
+            .order(
+                sort_column, desc=descending
+            )  # Use desc parameter instead of ascending
             .execute()
         )
 
