@@ -6,7 +6,8 @@ from fastapi import FastAPI, Request, HTTPException, Form
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from supabase.client import Client, create_client  # Correct import path
+from supabase import Client, create_client  # type: ignore
+from postgrest.types import CountMethod
 from dotenv import load_dotenv
 import json
 from pydantic import BaseModel
@@ -126,41 +127,35 @@ async def get_llm_stream(
         yield f"data: {json.dumps({'error': f'Failed to get response from LLM: {e}'})}\n\n"
 
 
-async def stream_and_save_new_response(prompt_id: str, prompt_text_for_llm: str):
+async def stream_and_save_new_response(
+    prompt_id: str,
+    model_name: str,
+    system_prompt: str,
+    messages: list,
+    max_tokens: int,
+):
     """
-    Prepares arguments, calls LLM stream, yields chunks for the client,
+    Calls LLM stream with provided parameters, yields chunks for the client,
     and saves the full response along with model info to the `responses` table.
     """
     full_response = ""
     error_occurred = False
 
-    # --- Prepare LLM Arguments ---
-    model_name = (
-        "claude-3-5-sonnet-20240620"  # Define model here or pass as arg if dynamic
-    )
-    system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
-    max_tokens_to_sample = 2048
-    # Construct the messages payload for the API
-    messages = [
-        {
-            "role": "user",
-            "content": f"Write a Paul Graham essay about {prompt_text_for_llm}",
-        }
-    ]
-    # Create the dictionary of arguments to be saved
+    # --- Prepare arguments dictionary for saving ---
+    # Construct this based on the arguments *received* by the function
     model_arguments_to_save = {
         "model": model_name,
-        "max_tokens": max_tokens_to_sample,
+        "max_tokens": max_tokens,
         "system": system_prompt,
         "messages": messages,
-        # Add other relevant parameters if used (e.g., temperature)
+        # Add other relevant parameters if they were passed (e.g., temperature)
     }
-    # -----------------------------
+    # --------------------------------------------
 
     try:
-        # Pass prepared arguments to the LLM stream function
+        # Pass received arguments directly to the LLM stream function
         async for chunk in get_llm_stream(
-            model_name, system_prompt, messages, max_tokens_to_sample
+            model_name, system_prompt, messages, max_tokens
         ):
             if isinstance(chunk, str) and chunk.startswith('data: {"error":'):
                 yield chunk  # Propagate error SSE event
@@ -180,36 +175,30 @@ async def stream_and_save_new_response(prompt_id: str, prompt_text_for_llm: str)
             )
             return
 
-        # --- Save the new response AND model info to the `responses` table ---
+        # --- Save the new response to the `responses` table --- #
+        # Note: model_name and model_arguments are now saved in the prompts table
         if supabase and full_response:
-            logger.info(
-                f"Attempting to save new response for prompt_id: '{prompt_id}' with model info."
-            )
+            logger.info(f"Attempting to save new response for prompt_id: '{prompt_id}'")
             try:
-                # Convert arguments dict to JSON string for Supabase client if needed,
-                # although supabase-py might handle dicts directly for JSONB. Test this.
-                # arguments_json = json.dumps(model_arguments_to_save)
-                arguments_json = model_arguments_to_save  # Try passing dict directly
-
                 insert_resp = (
                     supabase.table("responses")
                     .insert(
                         {
                             "prompt_id": prompt_id,
                             "response_text": full_response,
-                            "model_name": model_name,  # Save model name
-                            "model_arguments": arguments_json,  # Save arguments JSON
+                            # "model_name": model_name,  # Removed: Belongs in prompts table
+                            # "model_arguments": arguments_json, # Removed: Belongs in prompts table
                         }
                     )
                     .execute()
                 )
                 logger.info(
-                    f"Successfully saved new response for prompt_id: '{prompt_id}' with model info."
+                    f"Successfully saved new response for prompt_id: '{prompt_id}'"
                 )
 
             except Exception as e:
                 logger.exception(
-                    f"Error saving new response/model info to Supabase for prompt_id '{prompt_id}'",
+                    f"Error saving new response to Supabase for prompt_id '{prompt_id}'",
                     exc_info=e,
                 )
                 yield f"data: {json.dumps({'error': 'Failed to save new response.'})}\n\n"
@@ -365,6 +354,18 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
             )
             try:
                 # Insert new prompt
+                model_name = "claude-3-5-sonnet-20240620"
+                system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
+                max_tokens = 2048
+                messages = [
+                    {
+                        "role": "user",
+                        "content": f"Write a Paul Graham essay about {short_description}",  # Use full description for the LLM
+                    }
+                ]
+                # ----------------------------- #
+
+                # Insert new prompt with model details
                 insert_prompt_resp = (
                     supabase.table("prompts")
                     .insert(
@@ -372,6 +373,10 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
                             "prompt_text": truncated_prompt,
                             "short_description": short_description,
                             "view_count": 1,
+                            "model_name": model_name,  # Add model name here
+                            "model_arguments": messages[0][
+                                "content"
+                            ],  # Add arguments here (Adjust based on desired format)
                         }
                     )
                     .execute()
@@ -382,9 +387,16 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
                     logger.info(
                         f"Successfully inserted new prompt with ID: {new_prompt_id}"
                     )
+
                     # Generate, stream, and save the first response (including model info)
                     return StreamingResponse(
-                        stream_and_save_new_response(new_prompt_id, truncated_prompt),
+                        stream_and_save_new_response(
+                            new_prompt_id,
+                            model_name,
+                            system_prompt,
+                            messages,
+                            max_tokens,
+                        ),
                         media_type="text/event-stream",
                     )
                 else:
@@ -413,10 +425,30 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
                         logger.info(
                             f"Recovered prompt_id: {recovered_prompt_id}. Generating new response for existing prompt."
                         )
+
+                        # --- Define LLM Parameters (Race Condition Recovery) --- #
+                        model_name = "claude-3-5-sonnet-20240620"
+                        system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
+                        max_tokens = 2048
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": f"Write a Paul Graham essay about {short_description}",  # Use full description
+                            }
+                        ]
+                        # ----------------------------------------------------- #
+
                         # Generate a new response and save it, linked to the recovered prompt_id
+                        # NOTE: We don't update the prompt record here as it already exists.
+                        # The model details used for *this specific response* generation are saved
+                        # in the responses table by stream_and_save_new_response.
                         return StreamingResponse(
                             stream_and_save_new_response(
-                                recovered_prompt_id, truncated_prompt
+                                recovered_prompt_id,
+                                model_name,
+                                system_prompt,
+                                messages,
+                                max_tokens,
                             ),
                             media_type="text/event-stream",
                         )
@@ -471,7 +503,7 @@ async def get_essays(sort_by: str = "time", order: str = "desc"):
         response = (
             supabase.table("prompts")
             .select(
-                "short_description, created_at, view_count", count="exact"
+                "short_description, created_at, view_count", count=CountMethod.exact
             )  # Keep count="exact" for now, monitor Supabase docs if needed
             .order(
                 sort_column, desc=descending
