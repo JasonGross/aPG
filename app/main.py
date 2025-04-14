@@ -1,73 +1,72 @@
 import os
 import asyncio
+import logging
 from fastapi import FastAPI, Request, HTTPException, Form
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from supabase import create_client, Client
-
-# Removed httpx import as we'll use the anthropic client directly
 from dotenv import load_dotenv
 import json
-from pydantic import (
-    BaseModel,
-)  # For potential request body validation if not using Forms
+from pydantic import BaseModel
 
 # --- Import Anthropic ---
-from anthropic import (
-    AsyncAnthropic,
-    APIError,
-)  # Import Anthropic client and specific errors
+from anthropic import AsyncAnthropic, APIError
 
-# Load environment variables from .env file for local development
+# --- Configure Logging ---
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
 load_dotenv()
 
 # --- Configuration ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv(
-    "SUPABASE_SERVICE_KEY"
-)  # Use service key for backend operations
-# ANTHROPIC_API_KEY is the standard env var, but we use LLM_API_KEY from previous steps
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-# LLM_API_ENDPOINT is not needed when using the official client library
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+ANTHROPIC_API_KEY = os.getenv("LLM_API_KEY")
 
 # --- Initialize Supabase Client ---
 try:
     if SUPABASE_URL and SUPABASE_SERVICE_KEY:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        logger.info("Supabase client initialized successfully.")
     else:
-        print("Warning: Supabase URL or Key not found in environment variables.")
+        logger.warning(
+            "Supabase URL or Key not found. Database functionality disabled."
+        )
         supabase = None
 except Exception as e:
-    print(f"Error initializing Supabase client: {e}")
-    supabase = None  # Set to None to indicate failure
+    logger.exception("Error initializing Supabase client", exc_info=e)
+    supabase = None
 
 # --- Initialize Anthropic Client ---
 try:
     if ANTHROPIC_API_KEY:
-        # Use the API key from the environment variable LLM_API_KEY
         anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        logger.info("Anthropic client initialized successfully.")
     else:
-        print("Warning: Anthropic API Key (LLM_API_KEY) not found.")
+        logger.warning(
+            "Anthropic API Key (LLM_API_KEY) not found. LLM functionality disabled."
+        )
         anthropic_client = None
 except Exception as e:
-    print(f"Error initializing Anthropic client: {e}")
+    logger.exception("Error initializing Anthropic client", exc_info=e)
     anthropic_client = None
 
 # --- Initialize FastAPI App ---
 app = FastAPI()
 
-# --- Mount Static Files (CSS, JS) ---
+# --- Mount Static Files & Templates ---
 script_dir = os.path.dirname(__file__)
 static_dir = os.path.join(script_dir, "static")
-if not os.path.exists(static_dir):
-    os.makedirs(static_dir)  # Create static dir if it doesn't exist
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
-# --- Configure Templates ---
 templates_dir = os.path.join(script_dir, "templates")
+if not os.path.exists(static_dir):
+    os.makedirs(static_dir)
 if not os.path.exists(templates_dir):
-    os.makedirs(templates_dir)  # Create templates dir if it doesn't exist
+    os.makedirs(templates_dir)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 templates = Jinja2Templates(directory=templates_dir)
 
 
@@ -77,130 +76,150 @@ def truncate_prompt(text: str, max_length: int = 70) -> str:
     return text[:max_length]
 
 
-async def get_llm_stream(prompt: str):
+async def get_llm_stream(
+    model_name: str, system_prompt: str, messages: list, max_tokens: int
+):
     """
-    Gets streaming response from Anthropic Claude API.
-    Yields text chunks.
+    Gets streaming response from Anthropic Claude API using provided arguments.
+    Yields text chunks or SSE error events.
     """
     if not anthropic_client:
-        print("Anthropic client not initialized.")
+        logger.error("Anthropic client not initialized. Cannot call LLM.")
         yield f"data: {json.dumps({'error': 'LLM service not configured.'})}\n\n"
         return
 
-    full_llm_prompt = f"Write a Paul Graham essay about {prompt}"
-    system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
-    # Using Claude 3.5 Sonnet model ID
-    model_name = "claude-3-5-sonnet-20240620"
-    max_tokens_to_sample = 2048  # Adjust as needed
-
-    print(f"Sending to Claude ({model_name}): {full_llm_prompt}")  # For debugging
+    logger.info(f"Sending request to Claude model: '{model_name}'")
+    # Log arguments (be careful with potentially large message content in production)
+    # logger.debug(f"LLM Args: model={model_name}, max_tokens={max_tokens}, system='{system_prompt[:50]}...', messages={messages}")
 
     try:
-        # Use the Messages streaming API
         async with anthropic_client.messages.stream(
             model=model_name,
-            max_tokens=max_tokens_to_sample,
+            max_tokens=max_tokens,
             system=system_prompt,
-            messages=[{"role": "user", "content": full_llm_prompt}],
+            messages=messages,
         ) as stream:
-            # Iterate through the stream events asynchronously
             async for event in stream:
-                # Check for text delta events
                 if (
                     event.type == "content_block_delta"
                     and event.delta.type == "text_delta"
                 ):
-                    text_chunk = event.delta.text
-                    # print(f"Received chunk: {text_chunk}") # Debugging
-                    yield text_chunk  # Yield the raw text chunk
-
+                    yield event.delta.text
+        logger.info(f"Successfully completed LLM stream from model: '{model_name}'")
     except APIError as e:
-        print(f"Anthropic API Error: {e}")
+        logger.error(
+            f"Anthropic API Error status={e.status_code} model='{model_name}' message='{e.message}'",
+            exc_info=False,
+        )
         yield f"data: {json.dumps({'error': f'LLM API Error: {e.status_code} - {e.message}'})}\n\n"
     except Exception as e:
-        print(f"Error calling Anthropic API: {e}")
+        logger.exception(
+            f"Error calling Anthropic API model: '{model_name}'", exc_info=e
+        )
         yield f"data: {json.dumps({'error': f'Failed to get response from LLM: {e}'})}\n\n"
 
 
-async def stream_and_save_essay(truncated_prompt: str):
+async def stream_and_save_new_response(prompt_id: str, prompt_text_for_llm: str):
     """
-    Streams response from LLM, yields chunks for the client (as SSE events),
-    and saves the full response to Supabase upon completion.
+    Prepares arguments, calls LLM stream, yields chunks for the client,
+    and saves the full response along with model info to the `responses` table.
     """
     full_response = ""
     error_occurred = False
+
+    # --- Prepare LLM Arguments ---
+    model_name = (
+        "claude-3-5-sonnet-20240620"  # Define model here or pass as arg if dynamic
+    )
+    system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
+    max_tokens_to_sample = 2048
+    # Construct the messages payload for the API
+    messages = [
+        {
+            "role": "user",
+            "content": f"Write a Paul Graham essay about {prompt_text_for_llm}",
+        }
+    ]
+    # Create the dictionary of arguments to be saved
+    model_arguments_to_save = {
+        "model": model_name,
+        "max_tokens": max_tokens_to_sample,
+        "system": system_prompt,
+        "messages": messages,
+        # Add other relevant parameters if used (e.g., temperature)
+    }
+    # -----------------------------
+
     try:
-        async for chunk in get_llm_stream(truncated_prompt):
-            # Check if the chunk indicates an error (yielded by get_llm_stream)
+        # Pass prepared arguments to the LLM stream function
+        async for chunk in get_llm_stream(
+            model_name, system_prompt, messages, max_tokens_to_sample
+        ):
             if isinstance(chunk, str) and chunk.startswith('data: {"error":'):
-                yield chunk  # Propagate error SSE event to client
-                print(f"LLM Stream Error reported: {chunk}")
+                yield chunk  # Propagate error SSE event
+                logger.warning(
+                    f"LLM Stream Error reported for prompt_id '{prompt_id}': {chunk}"
+                )
                 error_occurred = True
-                # Don't break here, let get_llm_stream finish if it yields more details
-                # Break or return after the loop if error_occurred is True
-                continue  # Skip processing this chunk as text
+                continue
 
-            # Accumulate response and yield chunk to client
             full_response += chunk
-            # Format as Server-Sent Event (SSE)
             yield f"data: {json.dumps({'text': chunk})}\n\n"
-            await asyncio.sleep(0.01)  # Small delay to allow client processing
+            await asyncio.sleep(0.01)
 
-        # If an error was yielded during the stream, don't save or send 'end'
         if error_occurred:
-            print("Skipping save due to previous stream error.")
+            logger.warning(
+                f"Skipping save for prompt_id '{prompt_id}' due to previous stream error."
+            )
             return
 
-        # --- Save to Supabase after successful streaming ---
+        # --- Save the new response AND model info to the `responses` table ---
         if supabase and full_response:
+            logger.info(
+                f"Attempting to save new response for prompt_id: '{prompt_id}' with model info."
+            )
             try:
-                # Check again before inserting, in case of race condition
-                check_resp = (
-                    supabase.table("essays")
-                    .select("id")
-                    .eq("prompt", truncated_prompt)
-                    .limit(1)
+                # Convert arguments dict to JSON string for Supabase client if needed,
+                # although supabase-py might handle dicts directly for JSONB. Test this.
+                # arguments_json = json.dumps(model_arguments_to_save)
+                arguments_json = model_arguments_to_save  # Try passing dict directly
+
+                insert_resp = (
+                    supabase.table("responses")
+                    .insert(
+                        {
+                            "prompt_id": prompt_id,
+                            "response_text": full_response,
+                            "model_name": model_name,  # Save model name
+                            "model_arguments": arguments_json,  # Save arguments JSON
+                        }
+                    )
                     .execute()
                 )
-                if not check_resp.data:
-                    insert_resp = (
-                        supabase.table("essays")
-                        .insert(
-                            {
-                                "prompt": truncated_prompt,
-                                "response": full_response,
-                                "view_count": 1,  # Initial view count
-                            }
-                        )
-                        .execute()
-                    )
-                    print(f"Saved new essay for prompt: {truncated_prompt}")
-                else:
-                    print(
-                        f"Essay for '{truncated_prompt}' already exists (checked before insert). Not saving again."
-                    )
+                logger.info(
+                    f"Successfully saved new response for prompt_id: '{prompt_id}' with model info."
+                )
 
             except Exception as e:
-                # Handle potential unique constraint violation if race condition occurs
-                # The check above makes this less likely, but keep handling just in case.
-                if "duplicate key value violates unique constraint" in str(e):
-                    print(
-                        f"Race condition? Essay for '{truncated_prompt}' already exists."
-                    )
-                else:
-                    print(f"Error saving essay to Supabase: {e}")
-                    # Optionally yield an error message back to client if critical
-                    yield f"data: {json.dumps({'error': 'Failed to save essay.'})}\n\n"
-                    error_occurred = True  # Mark error occurred
+                logger.exception(
+                    f"Error saving new response/model info to Supabase for prompt_id '{prompt_id}'",
+                    exc_info=e,
+                )
+                yield f"data: {json.dumps({'error': 'Failed to save new response.'})}\n\n"
+                error_occurred = True
 
-        # Signal stream end only if no errors occurred
         if not error_occurred:
+            logger.info(
+                f"Successfully streamed and saved new response for prompt_id: '{prompt_id}'"
+            )
             yield f"data: {json.dumps({'end': True})}\n\n"
 
     except Exception as e:
-        print(f"Error during streaming/saving: {e}")
-        # Send error as SSE data event
-        yield f"data: {json.dumps({'error': f'An error occurred: {e}'})}\n\n"
+        logger.exception(
+            f"Error during streaming/saving new response for prompt_id '{prompt_id}'",
+            exc_info=e,
+        )
+        yield f"data: {json.dumps({'error': f'An error occurred during streaming/saving: {e}'})}\n\n"
 
 
 # --- API Endpoints ---
@@ -209,21 +228,35 @@ async def stream_and_save_essay(truncated_prompt: str):
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
     """Serves the main HTML page."""
-    if not os.path.exists(os.path.join(templates_dir, "index.html")):
+    template_path = os.path.join(templates_dir, "index.html")
+    if not os.path.exists(template_path):
+        logger.error(f"Template file not found at {template_path}")
         raise HTTPException(status_code=404, detail="index.html not found")
+    logger.info(f"Serving root page request from {request.client.host}")
     return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.post("/ask")
-async def ask_paul_graham(prompt: str = Form(...)):
+async def ask_paul_graham(request: Request, prompt: str = Form(...)):
     """
-    Handles prompt submission, checks cache, calls LLM, streams response.
-    Uses Server-Sent Events (SSE).
+    Handles prompt submission. Stores original prompt as short_description.
+    Uses truncated prompt (prompt_text) for uniqueness check.
+    Fetches latest response if prompt_text exists, otherwise generates new response
+    and stores it along with model invocation details.
     """
-    if not prompt:
+    client_host = request.client.host if request.client else "unknown"
+    short_description = prompt.strip()
+    logger.info(
+        f"Received /ask request with short_description: '{short_description}' from {client_host}"
+    )
+
+    if not short_description:
+        logger.warning("Received empty prompt in /ask request.")
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
+    # --- DB/LLM Client Checks ---
     if not supabase:
-        # Return SSE error if DB is down
+        logger.error("Supabase client not available for /ask request.")
+
         async def db_error_stream():
             yield f"data: {json.dumps({'error': 'Database connection not available.'})}\n\n"
 
@@ -231,66 +264,174 @@ async def ask_paul_graham(prompt: str = Form(...)):
             db_error_stream(), media_type="text/event-stream", status_code=503
         )
     if not anthropic_client:
-        # Return SSE error if LLM client isn't configured
+        logger.error("Anthropic client not available for /ask request.")
+
         async def llm_error_stream():
             yield f"data: {json.dumps({'error': 'LLM service not configured.'})}\n\n"
 
         return StreamingResponse(
             llm_error_stream(), media_type="text/event-stream", status_code=503
         )
+    # ---------------------------
 
-    truncated = truncate_prompt(prompt)
+    truncated_prompt = truncate_prompt(short_description)
+    logger.info(f"Using truncated prompt_text for lookup: '{truncated_prompt}'")
 
     try:
-        # Check if essay already exists
-        response = (
-            supabase.table("essays")
-            .select("response, view_count")
-            .eq("prompt", truncated)
+        # Check if prompt_text exists in `prompts` table
+        prompt_resp = (
+            supabase.table("prompts")
+            .select("prompt_id, view_count")
+            .eq("prompt_text", truncated_prompt)
             .limit(1)
             .execute()
         )
-        existing_essay = response.data
+        existing_prompt = prompt_resp.data
 
-        if existing_essay:
-            print(f"Cache hit for prompt: {truncated}")
-            essay_data = existing_essay[0]
-            saved_response = essay_data["response"]
-            current_views = essay_data["view_count"]
+        if existing_prompt:
+            # --- Prompt Exists ---
+            prompt_data = existing_prompt[0]
+            prompt_id = prompt_data["prompt_id"]
+            current_views = prompt_data["view_count"]
+            logger.info(
+                f"Prompt exists (ID: {prompt_id}). Incrementing view count and fetching latest response."
+            )
 
             # Increment view count
             try:
-                supabase.table("essays").update({"view_count": current_views + 1}).eq(
-                    "prompt", truncated
+                supabase.table("prompts").update({"view_count": current_views + 1}).eq(
+                    "prompt_id", prompt_id
                 ).execute()
+                logger.info(
+                    f"Incremented view count for prompt_id '{prompt_id}' to {current_views + 1}"
+                )
             except Exception as e:
-                print(f"Error updating view count: {e}")  # Log error but continue
+                logger.error(
+                    f"Error updating view count for prompt_id '{prompt_id}'", exc_info=e
+                )
 
-            # Stream the cached response word by word (or chunk by chunk) as SSE
-            async def stream_cached():
-                # Split into smaller chunks for smoother streaming simulation
-                chunk_size = 20  # Number of characters per chunk
-                for i in range(0, len(saved_response), chunk_size):
-                    chunk = saved_response[i : i + chunk_size]
-                    yield f"data: {json.dumps({'text': chunk})}\n\n"
-                    await asyncio.sleep(0.01)  # Simulate streaming delay
-                yield f"data: {json.dumps({'end': True})}\n\n"  # Signal end
-
-            return StreamingResponse(stream_cached(), media_type="text/event-stream")
-
-        else:
-            print(f"Cache miss for prompt: {truncated}. Calling LLM.")
-            # Stream from LLM and save upon completion
-            return StreamingResponse(
-                stream_and_save_essay(truncated), media_type="text/event-stream"
+            # Fetch the latest response text
+            latest_response_resp = (
+                supabase.table("responses")
+                .select("response_text")
+                .eq("prompt_id", prompt_id)
+                .order("response_created_at", desc=True)
+                .limit(1)
+                .execute()
             )
 
-    except Exception as e:
-        print(f"Error in /ask endpoint: {e}")
+            if latest_response_resp.data:
+                latest_response_text = latest_response_resp.data[0]["response_text"]
+                logger.info(
+                    f"Found latest response for prompt_id '{prompt_id}'. Streaming it back."
+                )
 
-        # Return error as SSE event
+                # Stream the cached/latest response
+                async def stream_latest_cached():
+                    chunk_size = 20
+                    for i in range(0, len(latest_response_text), chunk_size):
+                        chunk = latest_response_text[i : i + chunk_size]
+                        yield f"data: {json.dumps({'text': chunk})}\n\n"
+                        await asyncio.sleep(0.01)
+                    yield f"data: {json.dumps({'end': True})}\n\n"
+
+                return StreamingResponse(
+                    stream_latest_cached(), media_type="text/event-stream"
+                )
+            else:
+                logger.error(f"Prompt '{prompt_id}' exists, but no responses found!")
+
+                # Option: Generate a new response for this existing prompt?
+                # For now, return error. Could call stream_and_save_new_response(prompt_id, truncated_prompt) here instead.
+                async def no_resp_stream():
+                    yield f"data: {json.dumps({'error': 'Found prompt but no responses available.'})}\n\n"
+
+                return StreamingResponse(
+                    no_resp_stream(), media_type="text/event-stream", status_code=404
+                )
+
+        else:
+            # --- Prompt Does Not Exist ---
+            logger.info(
+                f"Prompt_text '{truncated_prompt}' does not exist. Creating new prompt entry."
+            )
+            try:
+                # Insert new prompt
+                insert_prompt_resp = (
+                    supabase.table("prompts")
+                    .insert(
+                        {
+                            "prompt_text": truncated_prompt,
+                            "short_description": short_description,
+                            "view_count": 1,
+                        }
+                    )
+                    .execute()
+                )
+
+                if insert_prompt_resp.data:
+                    new_prompt_id = insert_prompt_resp.data[0]["prompt_id"]
+                    logger.info(
+                        f"Successfully inserted new prompt with ID: {new_prompt_id}"
+                    )
+                    # Generate, stream, and save the first response (including model info)
+                    return StreamingResponse(
+                        stream_and_save_new_response(new_prompt_id, truncated_prompt),
+                        media_type="text/event-stream",
+                    )
+                else:
+                    logger.error(
+                        f"Failed to insert new prompt '{truncated_prompt}'. Response: {insert_prompt_resp}"
+                    )
+                    raise Exception("Failed to create new prompt entry.")
+
+            except Exception as e:
+                # Handle potential race condition on prompt_text unique constraint
+                if "duplicate key value violates unique constraint" in str(
+                    e
+                ) and "prompts_prompt_text_key" in str(e):
+                    logger.warning(
+                        f"Race condition? Prompt_text '{truncated_prompt}' inserted between check/insert. Recovering."
+                    )
+                    recover_resp = (
+                        supabase.table("prompts")
+                        .select("prompt_id")
+                        .eq("prompt_text", truncated_prompt)
+                        .limit(1)
+                        .execute()
+                    )
+                    if recover_resp.data:
+                        recovered_prompt_id = recover_resp.data[0]["prompt_id"]
+                        logger.info(
+                            f"Recovered prompt_id: {recovered_prompt_id}. Generating new response for existing prompt."
+                        )
+                        # Generate a new response and save it, linked to the recovered prompt_id
+                        return StreamingResponse(
+                            stream_and_save_new_response(
+                                recovered_prompt_id, truncated_prompt
+                            ),
+                            media_type="text/event-stream",
+                        )
+                    else:
+                        logger.error(
+                            f"Race condition recovery failed for prompt_text '{truncated_prompt}'."
+                        )
+                        raise Exception("Failed to create or recover prompt entry.")
+                else:
+                    logger.exception(
+                        f"Error inserting new prompt with text '{truncated_prompt}'",
+                        exc_info=e,
+                    )
+                    raise e  # Re-raise other exceptions
+
+    except Exception as e:
+        logger.exception(
+            f"Error processing /ask request for prompt_text '{truncated_prompt}'",
+            exc_info=e,
+        )
+
         async def error_stream():
-            yield f"data: {json.dumps({'error': f'Server error: {e}'})}\n\n"
+            yield f"data: {json.dumps({'error': f'Server error processing request.'})}\n\n"
 
         return StreamingResponse(
             error_stream(), media_type="text/event-stream", status_code=500
@@ -299,52 +440,61 @@ async def ask_paul_graham(prompt: str = Form(...)):
 
 @app.get("/essays", response_class=JSONResponse)
 async def get_essays(sort_by: str = "time", order: str = "desc"):
-    """Fetches the list of saved essay prompts based on sorting preferences."""
+    """Fetches the list of saved prompts, returning short_description."""
+    logger.info(f"Received /essays request. Sort by: {sort_by}, Order: {order}")
     if not supabase:
+        logger.error("Supabase client not available for /essays request.")
         return JSONResponse(
             content={"error": "Database connection not available."}, status_code=503
         )
 
-    valid_sort_by = {"time": "created_at", "views": "view_count", "alpha": "prompt"}
+    valid_sort_by = {
+        "time": "created_at",
+        "views": "view_count",
+        "alpha": "short_description",
+    }
     valid_order = {"asc": True, "desc": False}
-
     sort_column = valid_sort_by.get(sort_by, "created_at")
     ascending = valid_order.get(order, False)
 
     try:
+        # Query the `prompts` table
         response = (
-            supabase.table("essays")
-            .select("prompt, created_at, view_count")
+            supabase.table("prompts")
+            .select("short_description, created_at, view_count", count="exact")
             .order(sort_column, ascending=ascending)
             .execute()
         )
 
-        # Convert Timestamps to ISO format strings for JSON serialization
-        essays_data = []
+        logger.info(f"Fetched {response.count} prompts from database.")
+        prompts_data = []
         if response.data:
             for row in response.data:
-                row["created_at"] = (
+                created_at_iso = (
                     row["created_at"].isoformat() if row.get("created_at") else None
                 )
-                essays_data.append(row)
-            return JSONResponse(content=essays_data)
+                prompts_data.append(
+                    {
+                        "prompt": row.get("short_description"),  # Use short_description
+                        "created_at": created_at_iso,
+                        "view_count": row.get("view_count"),
+                    }
+                )
+            return JSONResponse(content=prompts_data)
         else:
-            return JSONResponse(content=[])  # Return empty list if no essays
+            return JSONResponse(content=[])
 
     except Exception as e:
-        print(f"Error fetching essays: {e}")
+        logger.exception("Error fetching prompts from Supabase", exc_info=e)
         return JSONResponse(
-            content={"error": f"Failed to fetch essays: {e}"}, status_code=500
+            content={"error": "Failed to fetch prompts."}, status_code=500
         )
 
 
-# --- Optional: Add simple health check ---
+# --- Health Check ---
 @app.get("/health")
 async def health_check():
+    logger.debug("Health check requested.")
     db_status = "ok" if supabase else "unavailable"
     llm_status = "ok" if anthropic_client else "unavailable"
     return {"status": "ok", "database": db_status, "llm_service": llm_status}
-
-
-# Note: For Hugging Face Spaces deployment using Dockerfile,
-# the CMD instruction will run uvicorn. No need for __main__ block.
