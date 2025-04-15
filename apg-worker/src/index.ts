@@ -424,33 +424,37 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
             if (responseError) throw responseError;
 
             if (latestResponseData) {
-                // --- Stream Cached Response in Chunks ---
+                // --- Stream Cached Response Line by Line ---
                 console.log("Found existing response:", latestResponseData.response_id);
                 const response_id = latestResponseData.response_id;
-                const cachedText = latestResponseData.response_text || ""; // Ensure cachedText is a string
+                const cachedText = latestResponseData.response_text || "";
 
-                // Record View (Best effort - fire and forget)
+                // Record View (Best effort)
                 supabase.from('view_counts').insert({ response_id }).then(({ error: viewError }) => {
                     if (viewError) console.error("Failed to record view for cached response:", viewError);
                 });
 
-                // Chunking parameters
-                const chunkSize = 50; // Send 50 characters at a time
-                const delayMs = 15;   // Wait 15ms between chunks
+                // Parameters
+                const delayMs = 20; // Adjust delay between lines
 
-                console.log(`Streaming cached response (ID: ${response_id}) in chunks of ${chunkSize}...`);
+                console.log(`Streaming cached response (ID: ${response_id}) line by line...`);
 
-                for (let i = 0; i < cachedText.length; i += chunkSize) {
-                    const chunk = cachedText.substring(i, i + chunkSize);
-                    await writer.write(chunk); // Write the chunk (encoder wraps in JSON)
-                    // Add a small delay to simulate streaming pace
+                const lines = cachedText.split('\n');
+
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i];
+                    // Send the line plus the newline character that split removed
+                    // The encoder wraps this in data: {text: ...}
+                    await writer.write(line + (i < lines.length - 1 ? '\n' : ''));
+
+                    // Add a small delay
                     if (delayMs > 0) {
                         await new Promise(resolve => setTimeout(resolve, delayMs));
                     }
                 }
                 // -----------------------------------------
 
-                await writer.write({ end: true }); // Signal end after all chunks are sent
+                await writer.write({ end: true }); // Signal end after all lines are sent
                 console.log("Finished streaming cached response.");
 
             } else {
