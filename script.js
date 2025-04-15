@@ -1,5 +1,8 @@
 // static/script.js
 
+let allEssays = [];
+let responseCache = {};
+
 document.addEventListener('DOMContentLoaded', () => {
     const promptForm = document.getElementById('prompt-form');
     const promptInput = document.getElementById('prompt-input');
@@ -13,8 +16,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentSort = { field: 'time', order: 'desc' }; // Default sort
     let eventSource = null; // To hold the EventSource connection
-    let allEssays = [];
-    let responseCache = {};
     let titleRendered = false; // Flag to track if the title part has been rendered
 
     // --- Helper: Finalize UI State ---
