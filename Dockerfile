@@ -35,4 +35,4 @@ EXPOSE 8000
 # app.main:app: Tells uvicorn where to find the FastAPI app instance
 # (in main.py inside the 'app' directory, the instance named 'app')
 # Adjust 'app.main:app' if your file/instance names are different.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
