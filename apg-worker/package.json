@@ -2,5 +2,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@supabase/supabase-js": "^2.49.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250415.0"
   }
 }

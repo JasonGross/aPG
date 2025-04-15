@@ -1,6 +1,7 @@
 // src/index.ts
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import Anthropic from '@anthropic-ai/sdk';
+import type { ExecutionContext } from '@cloudflare/workers-types';
 
 // Define the structure of environment variables/secrets
 export interface Env {
@@ -15,6 +16,67 @@ export interface Env {
     LLM_PROMPT_TEMPLATE: string;
 
     // Add bindings for KV, R2, etc. if needed later
+}
+
+// --- CORS Configuration ---
+const ALLOWED_ORIGINS: string[] = [
+    'https://apg-6do.pages.dev',
+    'https://askpg.ai',
+    'https://askpaulgraham.ai',
+    // Add localhost for local development if needed:
+    // 'http://localhost:8000', // Example port
+    // 'http://127.0.0.1:8000'
+];
+
+const BASE_CORS_HEADERS = {
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Max-Age': '86400', // Optional: Cache preflight response for 1 day
+};
+
+// --- Helper: Add CORS headers to a Response ---
+function addCorsHeaders(response: Response, origin: string): Response {
+    response = new Response(response.body, response);
+    // Set base headers
+    Object.entries(BASE_CORS_HEADERS).forEach(([key, value]) => {
+        response.headers.set(key, value);
+    });
+    // Set the specific allowed origin
+    response.headers.set('Access-Control-Allow-Origin', origin);
+    return response;
+}
+
+// --- Helper: Handle OPTIONS Preflight Requests ---
+function handleOptions(request: Request): Response {
+    const origin = request.headers.get('Origin');
+
+    // Check if origin is allowed
+    if (origin && ALLOWED_ORIGINS.includes(origin)) {
+        // Check if it's a valid preflight request
+        if (
+            request.headers.get('Access-Control-Request-Method') !== null &&
+            request.headers.get('Access-Control-Request-Headers') !== null
+        ) {
+            // Handle CORS preflight requests with dynamic origin.
+            const headers = {
+                ...BASE_CORS_HEADERS,
+                'Access-Control-Allow-Origin': origin, // Echo the specific origin
+            };
+            return new Response(null, {
+                status: 204, // No Content
+                headers: headers,
+            });
+        }
+    }
+
+    // If origin not allowed or not a valid preflight, handle as a standard OPTIONS request
+    // Or return 403, but a simple response is often sufficient.
+    return new Response(null, {
+        status: 204, // Typically OPTIONS requests don't need a body
+        headers: {
+            Allow: 'GET, POST, OPTIONS', // Methods allowed on the worker
+        },
+    });
 }
 
 // --- Helper: Initialize Clients (Consider Singleton if needed) ---
@@ -80,23 +142,50 @@ function createEndSSEEvent(): string {
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const url = new URL(request.url);
+        const origin = request.headers.get("Origin");
+
+        // --- Handle OPTIONS Preflight Requests ---
+        if (request.method === 'OPTIONS') {
+            return handleOptions(request);
+        }
+
+        // --- Check Origin for non-OPTIONS requests ---
+        if (!origin || !ALLOWED_ORIGINS.includes(origin)) {
+            console.warn(`Origin ${origin} not allowed.`);
+            // Return a forbidden response if origin is missing or not allowed
+            return new Response(JSON.stringify({ error: 'Forbidden - Origin not allowed' }), {
+                status: 403,
+                headers: { 'Content-Type': 'application/json' }
+                // No CORS headers needed for a 403 response usually
+            });
+        }
+
+        // --- Initialize Clients ---
         const supabase = getSupabaseClient(env);
         const anthropic = getAnthropicClient(env);
+        let response: Response; // Declare response variable
 
         // --- Basic Routing ---
-        if (url.pathname === '/ask' && request.method === 'POST') {
-            return handleAsk(request, env, supabase, anthropic);
+        try {
+            if (url.pathname === '/ask' && request.method === 'POST') {
+                response = await handleAsk(request, env, supabase, anthropic);
+            } else if (url.pathname === '/essays' && request.method === 'GET') {
+                response = await handleEssays(request, env, supabase);
+            } else {
+                response = new Response('Not Found', { status: 404 });
+            }
+        } catch (e: any) {
+            console.error("Unhandled error in fetch handler:", e);
+            // Ensure a generic error response
+            response = new Response(JSON.stringify({ error: "Internal Server Error" }), {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' }
+            });
         }
 
-        if (url.pathname === '/essays' && request.method === 'GET') {
-            return handleEssays(request, env, supabase);
-        }
-
-        // Add /health or other routes if needed
-        // if (url.pathname === '/health') { ... }
-
-        // Default 404 for other paths
-        return new Response('Not Found', { status: 404 });
+        // --- Add CORS Headers Dynamically to ALL Allowed Responses ---
+        // The origin check above ensures we only reach here if the origin is allowed
+        return addCorsHeaders(response, origin);
     },
 };
 
