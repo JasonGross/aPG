@@ -106,11 +106,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 viewCountSpan.style.display = 'none'; // Always hide when mouse leaves
             });
 
+            // --- Modified Click Listener ---
             li.addEventListener('click', () => {
-                promptInput.value = essay.prompt;
-                promptInput.dispatchEvent(new Event('input'));
+                const clickedPrompt = essay.prompt;
+                console.log("Essay clicked:", clickedPrompt);
+
+                // Update URL without reload
+                try {
+                    const url = new URL(window.location);
+                    url.searchParams.set('prompt', clickedPrompt); // Set/update the prompt parameter
+                    // Use pushState to change URL without full page load
+                    history.pushState({ prompt: clickedPrompt }, '', url.toString());
+                    console.log("URL updated to:", url.toString());
+                } catch (e) {
+                    console.error("Error updating URL:", e);
+                    // Fallback or simply proceed without URL change if needed
+                }
+
+                // Set the input value and simulate submission (existing logic)
+                promptInput.value = clickedPrompt;
+                promptInput.dispatchEvent(new Event('input')); // Update char count
                 promptForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
             });
+            // ----------------------------- //
 
             essaysList.appendChild(li);
             console.log(`Appended item ${index + 1} to the list.`);
@@ -153,6 +171,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const prompt = promptInput.value.trim();
 
         if (!prompt) return; // Do nothing if prompt is empty
+
+        // --- Update URL with the submitted prompt ---
+        try {
+            const url = new URL(window.location);
+            url.searchParams.set('prompt', prompt);
+            history.pushState({ prompt: prompt }, '', url.toString());
+            console.log("URL updated on submit to:", url.toString());
+        } catch (e) {
+            console.error("Error updating URL on submit:", e);
+        }
+        // ------------------------------------------ //
 
         // Close any existing EventSource connection
         if (eventSource) {
@@ -328,7 +357,35 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // --- Initial Load ---
-    fetchEssays(); // Load essays on page load with default sort
-    promptInput.dispatchEvent(new Event('input')); // Initialize char count
+    // --- Initial Load Logic ---
+    function initializePage() {
+        console.log("Initializing page...");
+        // Check for URL parameters on initial load
+        const urlParams = new URLSearchParams(window.location.search);
+        const promptFromUrl = urlParams.get('prompt');
+
+        if (promptFromUrl) {
+            console.log("Found prompt in URL:", promptFromUrl);
+            // Prefill the input box
+            promptInput.value = decodeURIComponent(promptFromUrl); // Decode just in case
+            // Update character count
+            promptInput.dispatchEvent(new Event('input'));
+            // Automatically trigger form submission
+            // Use a small timeout to ensure the DOM is fully ready and rendering isn't blocked
+            setTimeout(() => {
+                console.log("Submitting prompt from URL...");
+                promptForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            }, 100); // 100ms delay, adjust if needed
+        } else {
+            console.log("No prompt found in URL, loading default essays.");
+            // Fetch essays as normal if no prompt in URL
+            fetchEssays();
+        }
+
+        // Initialize char count display regardless
+        promptInput.dispatchEvent(new Event('input'));
+    }
+
+    // Run initialization logic
+    initializePage();
 });

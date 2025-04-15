@@ -8,6 +8,7 @@
     font-variant: small-caps;
     font-weight: bold;
     /* Optional: make it bolder */
+    font-size: medium;
 }
 
 /* Example: Style for the active sort button */
@@ -32,6 +33,9 @@
     /* orange-400 */
     /* padding-left: 1rem; */
     /* margin-top: 0.5rem; */
+    font-family: Verdana, Geneva, sans-serif;
+    /* Set font for essay body */
+    font-size: small;
 }
 
 /* Ensure loading indicator is centered or styled appropriately if used more prominently */
