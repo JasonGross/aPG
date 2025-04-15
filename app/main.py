@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-from typing import Optional  # Import Optional for type hinting
+from typing import Optional, Dict, Any  # Import Dict and Any
 from fastapi import FastAPI, Request, HTTPException, Form
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import json
 from pydantic import BaseModel
 from datetime import datetime  # Add datetime import
+import yaml  # Import YAML
 
 # --- Import Anthropic ---
 from anthropic import AsyncAnthropic, APIError
@@ -62,6 +63,32 @@ except Exception as e:
 
 # --- Initialize FastAPI App ---
 app = FastAPI()
+
+# --- Load Configuration ---
+config: Dict[str, Any] = {}  # Global config dictionary
+script_dir = os.path.dirname(__file__)
+config_path = os.path.join(script_dir, "config.yaml")
+try:
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+        if not config or "llm" not in config:
+            raise ValueError("Invalid config structure: 'llm' section missing.")
+        logger.info(f"Successfully loaded configuration from {config_path}")
+except FileNotFoundError:
+    logger.error(
+        f"Configuration file not found at {config_path}. LLM functionality may be limited."
+    )
+    # Optionally set default values or exit
+    config = {"llm": {}}  # Ensure config['llm'] exists
+except yaml.YAMLError as e:
+    logger.error(f"Error parsing configuration file {config_path}: {e}")
+    config = {"llm": {}}  # Ensure config['llm'] exists
+except Exception as e:
+    logger.exception(
+        f"An unexpected error occurred while loading configuration from {config_path}",
+        exc_info=e,
+    )
+    config = {"llm": {}}  # Ensure config['llm'] exists
 
 # --- Mount Static Files & Templates ---
 script_dir = os.path.dirname(__file__)
@@ -383,30 +410,69 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
         )
     # ---------------------------
 
-    # --- Determine Model Parameters --- #
-    # (Define these based on your logic - fixed for now)
-    model_name = "claude-3-5-sonnet-20240620"
-    system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
-    max_tokens = 3500  # GPT 2 token statistics on PG essays as of 2025-04-14
-    # Mean: 3284.29, Median: 2052, Mode: 3292
-    # Min: 104, Max: 17718, SD: 3086.28
-    prompt_text = f"Write a Paul Graham essay about {short_description}"
+    # --- Determine Model Parameters from Config --- #
+    llm_config = config.get("llm", {})
+    model_name = llm_config.get("model_name")
+    system_prompt = llm_config.get("system_prompt")
+    max_tokens_str = llm_config.get("max_tokens", "1000")  # Default if missing
+    prompt_template = llm_config.get(
+        "prompt_template", "Write an essay about {short_description}"
+    )  # Default template
+
+    # Validate required parameters
+    if not model_name:
+        logger.error("LLM model_name is missing in the configuration.")
+        raise HTTPException(
+            status_code=500, detail="LLM configuration error: model_name missing."
+        )
+    if not system_prompt:
+        logger.warning(
+            "LLM system_prompt is missing in the configuration. Using empty system prompt."
+        )
+        system_prompt = ""
+
+    # Safely convert max_tokens to int
+    try:
+        max_tokens = int(max_tokens_str)
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Invalid max_tokens value '{max_tokens_str}' in config. Using default 1000."
+        )
+        max_tokens = 1000
+
+    # Construct prompt_text using the template
+    try:
+        prompt_text = prompt_template.format(short_description=short_description)
+    except KeyError:
+        logger.warning(
+            f"Prompt template '{prompt_template}' is missing '{{short_description}}'. Using default template."
+        )
+        prompt_text = f"Write an essay about {short_description}"
+    except Exception as e:
+        logger.error(f"Error formatting prompt template: {e}. Using basic prompt.")
+        prompt_text = f"Write an essay about {short_description}"
+
+    logger.info(f"Using LLM Parameters: model='{model_name}', max_tokens={max_tokens}")
+    # logger.debug(f"System Prompt: '{system_prompt[:100]}...'") # Log truncated system prompt
+    # logger.debug(f"Generated Prompt Text: '{prompt_text[:100]}...'") # Log truncated final prompt
+
     messages = [
         {
             "role": "user",
-            "content": prompt_text,  # Use full description for the LLM
+            "content": prompt_text,  # Use the formatted prompt text
         }
     ]
-    # --------------------------------- #
+    # ------------------------------------------ #
 
     try:
         # --- Get or Create Model Params ID --- #
+        # Pass the actual values retrieved from config
         params_id = await get_or_create_model_params(
-            model_name, system_prompt, max_tokens
+            model_name=model_name, system_prompt=system_prompt, max_tokens=max_tokens
         )
         # ------------------------------------- #
 
-        # --- Find existing prompt based on short_description --- #
+        # --- Find existing prompt based on prompt_text (generated from template) --- #
         existing_prompt_result = (
             supabase.table("prompts")
             .select("prompt_id, created_at")
@@ -485,10 +551,11 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
 
             # Stream the cached/latest response
             async def stream_latest_cached():
-                chunk_size = 20
+                # chunk_size = 20
+                chunk_size = len(latest_response_text)
                 for i in range(0, len(latest_response_text), chunk_size):
                     chunk = latest_response_text[i : i + chunk_size]
-                    yield f"data: {json.dumps({'text': chunk})}\\n\\n"
+                    yield f"data: {json.dumps({'text': chunk})}\n\n"
                     await asyncio.sleep(0.01)
                 yield f"data: {json.dumps({'end': True})}\n\n"
 

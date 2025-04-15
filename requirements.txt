@@ -6,3 +6,6 @@ httpx>=0.24.0
 python-dotenv>=1.0.0
 jinja2>=3.0.0 # For templating
 anthropic>=0.20.0 # Added Anthropic client library
+psycopg2-binary
+requests
+PyYAML # Added for config file parsing

@@ -1,0 +1,8 @@
+llm:
+  model_name: "claude-3-5-sonnet-20240620"
+  system_prompt: |
+    You are an AI assistant that writes essays in the style of Paul Graham.
+    Focus on insights about startups, technology, programming, and contrarian thinking.
+    Be concise and clear.
+  max_tokens: 3500
+  prompt_template: "Write a Paul Graham essay about {short_description}"

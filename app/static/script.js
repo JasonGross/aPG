@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentSort = { field: 'time', order: 'desc' }; // Default sort
     let eventSource = null; // To hold the EventSource connection
+    let isFirstChunk = false; // Flag to track the first text chunk
 
     // --- Character Counter ---
     promptInput.addEventListener('input', () => {
@@ -22,6 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Fetch and Render Essays ---
     async function fetchEssays(sortBy = 'time', order = 'desc') {
+        console.log(`Fetching essays: sort=${sortBy}, order=${order}`); // Log fetch start
         essaysList.innerHTML = '<li class="text-gray-400">Loading essays...</li>'; // Show loading state
         try {
             const response = await fetch(`/essays?sort_by=${sortBy}&order=${order}`);
@@ -29,20 +31,43 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
             const essays = await response.json();
+            console.log("Fetched essays data:", essays); // Log the raw fetched data
 
             essaysList.innerHTML = ''; // Clear list
+
+            if (!Array.isArray(essays)) {
+                console.error("Invalid data received from /essays endpoint. Expected an array.", essays);
+                throw new Error("Received invalid data from server.");
+            }
 
             if (essays.length === 0) {
                 essaysList.innerHTML = '<li class="text-gray-500">No essays found yet.</li>';
             } else {
-                essays.forEach(essay => {
+                console.log("Rendering essays..."); // Log before starting loop
+                essays.forEach((essay, index) => {
+                    console.log(`Rendering essay ${index + 1}:`, essay); // Log each essay object
                     const li = document.createElement('li');
-                    // Simple display: just the prompt text
-                    li.textContent = essay.prompt;
-                    // Optional: Add view count or date
-                    // li.textContent += ` (Views: ${essay.view_count}, Created: ${new Date(essay.created_at).toLocaleDateString()})`;
+                    // Use essay.prompt, provide fallback if null/undefined
+                    const promptText = essay.prompt ? essay.prompt : '[No prompt text]';
+                    li.textContent = promptText;
+                    // Optional: Add view count or date (add checks for null values)
+                    // const createdAt = essay.created_at ? new Date(essay.created_at).toLocaleDateString() : 'N/A';
+                    // const viewCount = essay.view_count !== undefined ? essay.view_count : 'N/A';
+                    // li.textContent += ` (Views: ${viewCount}, Created: ${createdAt})`;
+
+                    // Make the list item clickable to load the prompt
+                    li.classList.add('cursor-pointer', 'hover:text-orange-700');
+                    li.addEventListener('click', () => {
+                        // Set the input value and simulate submission
+                        promptInput.value = essay.prompt; // Use the original prompt text
+                        promptInput.dispatchEvent(new Event('input')); // Update char count
+                        promptForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                    });
+
                     essaysList.appendChild(li);
+                    console.log(`Appended item ${index + 1} to the list.`); // Confirm appendChild worked
                 });
+                console.log("Finished rendering essays."); // Log after loop completes
             }
         } catch (error) {
             console.error('Error fetching essays:', error);
@@ -69,6 +94,7 @@ document.addEventListener('DOMContentLoaded', () => {
         loadingIndicator.classList.remove('hidden');
         responseOutput.innerHTML = ''; // Clear previous output
         errorMessage.classList.add('hidden'); // Hide previous errors
+        isFirstChunk = true; // Reset flag for new request
 
         try {
             // Use EventSource for Server-Sent Events
@@ -114,7 +140,40 @@ document.addEventListener('DOMContentLoaded', () => {
                             try {
                                 const data = JSON.parse(line.substring(5).trim());
                                 if (data.text) {
-                                    responseOutput.innerHTML += data.text; // Append text chunk
+                                    // Escape HTML to prevent injection
+                                    const escapedText = data.text
+                                        .replace(/&/g, '&amp;')
+                                        .replace(/</g, '&lt;')
+                                        .replace(/>/g, '&gt;')
+                                        .replace(/"/g, '&quot;')
+                                        .replace(/'/g, '&#039;');
+
+                                    let formattedOutput = "";
+                                    if (isFirstChunk) {
+                                        // Find the index of the first occurrence of one or more newlines
+                                        const firstParaBreakIndex = escapedText.search(/\n+/);
+
+                                        if (firstParaBreakIndex !== -1) {
+                                            // Extract title (before the first paragraph break)
+                                            const title = escapedText.substring(0, firstParaBreakIndex);
+                                            // Extract the rest of the text (including the newlines that caused the break)
+                                            const restOfText = escapedText.substring(firstParaBreakIndex);
+
+                                            // Format: Title span + replaced newlines in the rest
+                                            formattedOutput = `<span class="essay-title">${title}</span>${restOfText.replace(/\n+/g, '<br><br>')}`;
+                                            isFirstChunk = false; // Only process the first chunk this way
+                                        } else {
+                                            // If the first chunk has no newline sequence, treat the whole chunk as the title
+                                            const title = escapedText; // No need to replace newlines here if none exist
+                                            formattedOutput = `<span class="essay-title">${title}</span>`;
+                                            // Subsequent chunks will add <br> if needed
+                                        }
+                                    } else {
+                                        // For subsequent chunks, just escape and replace newlines
+                                        formattedOutput = escapedText.replace(/\n+/g, '<br><br>');
+                                    }
+                                    responseOutput.innerHTML += formattedOutput; // Append safely formatted text chunk
+
                                 } else if (data.error) {
                                     console.error("SSE Error:", data.error);
                                     errorMessage.textContent = `Error: ${data.error}`;

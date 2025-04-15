@@ -2,6 +2,14 @@
 
 /* Add any custom styles here if needed, complementing Tailwind */
 
+/* Style for the essay title */
+.essay-title {
+    color: #841814;
+    font-variant: small-caps;
+    font-weight: bold;
+    /* Optional: make it bolder */
+}
+
 /* Example: Style for the active sort button */
 .sort-button.active {
     font-weight: bold;
