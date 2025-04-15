@@ -433,6 +433,12 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                     if (viewError) console.error("Failed to record view for cached response:", viewError);
                 });
                 // Stream the cached text
+                // Log the cached response being streamed
+                console.log("Streaming cached response:", {
+                    response_id: latestResponseData.response_id,
+                    text_length: cachedText.length,
+                    text_preview: cachedText.substring(0, 1000) + "..." // Log first 1000 chars
+                });
                 await writer.write(cachedText);
                 await writer.write({ end: true }); // Signal end immediately for cache
                 console.log("Finished streaming cached response.");
