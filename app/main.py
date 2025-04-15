@@ -405,31 +405,44 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
         )
         # ------------------------------------- #
 
-        # --- Find or Create Prompt based on short_description --- #
-        prompt_upsert_result = (
+        # --- Find existing prompt based on short_description --- #
+        existing_prompt_result = (
             supabase.table("prompts")
-            .upsert(
-                {"short_description": short_description, "prompt_text": prompt_text},
-                on_conflict="prompt_text",
-                returning="representation",  # type: ignore
-                ignore_duplicates=False,
-            )
+            .select("prompt_id, created_at")
+            .eq("prompt_text", prompt_text)
+            .limit(1)
             .execute()
         )
 
-        if not prompt_upsert_result.data or len(prompt_upsert_result.data) == 0:
-            logger.error(
-                f"Failed to upsert prompt for description: {short_description}"
-            )
-            raise HTTPException(
-                status_code=500, detail="Failed to find or create prompt."
+        if existing_prompt_result.data and len(existing_prompt_result.data) > 0:
+            # Prompt already exists, use the existing one
+            prompt_info = existing_prompt_result.data[0]
+            prompt_id = prompt_info["prompt_id"]
+            prompt_created_at = prompt_info["created_at"]
+            logger.info(f"Found existing prompt with ID: {prompt_id}")
+        else:
+            # Create new prompt
+            new_prompt_result = (
+                supabase.table("prompts")
+                .insert(
+                    {"short_description": short_description, "prompt_text": prompt_text},
+                    returning="representation",  # type: ignore
+                )
+                .execute()
             )
 
-        prompt_info = prompt_upsert_result.data[0]
-        prompt_id = prompt_info["prompt_id"]
-        prompt_created_at = prompt_info[
-            "created_at"
-        ]  # Example of getting other info if needed
+            if not new_prompt_result.data or len(new_prompt_result.data) == 0:
+                logger.error(
+                    f"Failed to insert prompt for description: {short_description}"
+                )
+                raise HTTPException(
+                    status_code=500, detail="Failed to create prompt."
+                )
+
+            prompt_info = new_prompt_result.data[0]
+            prompt_id = prompt_info["prompt_id"]
+            prompt_created_at = prompt_info["created_at"]
+            logger.info(f"Created new prompt with ID: {prompt_id}")
 
         # Determine if the prompt was newly inserted or if it already existed
         # This logic might need refinement based on exact upsert behavior / timestamps
