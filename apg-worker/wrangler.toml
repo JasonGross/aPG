@@ -1,5 +1,5 @@
     # wrangler.toml
-    name = "my-apg-worker"
+    name = "apg-worker"
     main = "src/index.ts"
     compatibility_date = "2024-04-05" # Use a recent date
 
