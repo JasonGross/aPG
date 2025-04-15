@@ -80,6 +80,91 @@ def truncate_prompt(text: str, max_length: int = 70) -> str:
     return text[:max_length]
 
 
+async def get_or_create_model_params(
+    model_name: str, system_prompt: str, max_tokens: int, upsert_first: bool = False
+) -> str:
+    """Finds existing model parameters or creates them, returning the params_id."""
+    if not supabase:
+        logger.error("Supabase client not available for get_or_create_model_params")
+        raise HTTPException(
+            status_code=503, detail="Database connection not available."
+        )
+
+    params_to_find_or_insert = {
+        "model_name": model_name,
+        "system_prompt": system_prompt,
+        "max_tokens": max_tokens,
+    }
+    # Define the columns that form the unique constraint for conflict resolution
+    conflict_columns = "model_name, system_prompt, max_tokens"
+
+    if not upsert_first:
+        try:
+            select_resp = (
+                supabase.table("model_params")
+                .select("params_id")
+                .match(params_to_find_or_insert)
+                .limit(1)
+                .execute()
+            )
+            if select_resp.data:
+                params_id = select_resp.data[0]["params_id"]
+                return params_id
+        except Exception as e:
+            logger.warning("Error during model_params select", exc_info=e)
+        logger.warning(
+            f"Could not find model_params: {params_to_find_or_insert}. Creating new one."
+        )
+
+    logger.info(f"Upserting model_params: {params_to_find_or_insert}")
+    upsert_result = None
+    try:
+        upsert_result = (
+            supabase.table("model_params")
+            .upsert(
+                params_to_find_or_insert,
+                on_conflict=conflict_columns,
+                returning="representation",  # type: ignore
+                ignore_duplicates=False,  # Ensure we get the existing row if conflict
+            )
+            .execute()
+        )
+
+        if upsert_result.data and len(upsert_result.data) > 0:
+            params_id = upsert_result.data[0]["params_id"]
+            logger.info(f"Found or created model_params with ID: {params_id}")
+            return params_id
+    except Exception as e:
+        logger.exception("Error during model_params upsert", exc_info=e)
+    logger.error(
+        f"Upsert failed or did not return data for model_params: {params_to_find_or_insert}. Result: {upsert_result}"
+    )
+    return handle_model_params_error(params_to_find_or_insert)
+
+
+def handle_model_params_error(params_to_find_or_insert):
+    """Handle errors in model_params operations with helpful debugging SQL."""
+    # Suggest SQL that could be run manually to debug/fix the issue
+    suggested_sql = f"""
+-- Check if the record exists:
+SELECT * FROM model_params
+WHERE model_name = '{params_to_find_or_insert['model_name']}'
+AND system_prompt = '{params_to_find_or_insert['system_prompt']}'
+AND max_tokens = {params_to_find_or_insert['max_tokens']};
+
+-- If not found, try inserting manually:
+INSERT INTO model_params (model_name, system_prompt, max_tokens)
+VALUES ('{params_to_find_or_insert['model_name']}',
+        '{params_to_find_or_insert['system_prompt']}',
+        {params_to_find_or_insert['max_tokens']})
+RETURNING params_id;
+"""
+    logger.error(f"Suggested SQL to run manually: {suggested_sql}")
+    raise HTTPException(
+        status_code=500, detail="Failed to get or create model parameters."
+    )
+
+
 async def get_llm_stream(
     model_name: str, system_prompt: str, messages: list, max_tokens: int
 ):
@@ -129,28 +214,19 @@ async def get_llm_stream(
 
 async def stream_and_save_new_response(
     prompt_id: str,
+    params_id: str,
     model_name: str,
     system_prompt: str,
     messages: list,
     max_tokens: int,
 ):
     """
-    Calls LLM stream with provided parameters, yields chunks for the client,
-    and saves the full response along with model info to the `responses` table.
+    Calls LLM stream, yields chunks, saves the full response to `responses`
+    linking prompt_id and params_id, and records the initial view in `view_counts`.
     """
     full_response = ""
     error_occurred = False
-
-    # --- Prepare arguments dictionary for saving ---
-    # Construct this based on the arguments *received* by the function
-    model_arguments_to_save = {
-        "model": model_name,
-        "max_tokens": max_tokens,
-        "system": system_prompt,
-        "messages": messages,
-        # Add other relevant parameters if they were passed (e.g., temperature)
-    }
-    # --------------------------------------------
+    new_response_id = None
 
     try:
         # Pass received arguments directly to the LLM stream function
@@ -158,7 +234,7 @@ async def stream_and_save_new_response(
             model_name, system_prompt, messages, max_tokens
         ):
             if isinstance(chunk, str) and chunk.startswith('data: {"error":'):
-                yield chunk  # Propagate error SSE event
+                yield chunk
                 logger.warning(
                     f"LLM Stream Error reported for prompt_id '{prompt_id}': {chunk}"
                 )
@@ -176,25 +252,41 @@ async def stream_and_save_new_response(
             return
 
         # --- Save the new response to the `responses` table --- #
-        # Note: model_name and model_arguments are now saved in the prompts table
         if supabase and full_response:
-            logger.info(f"Attempting to save new response for prompt_id: '{prompt_id}'")
+            logger.info(
+                f"Attempting to save new response for prompt_id: '{prompt_id}', params_id: '{params_id}'"
+            )
             try:
-                insert_resp = (
+                response_insert_result = (
                     supabase.table("responses")
                     .insert(
                         {
                             "prompt_id": prompt_id,
+                            "params_id": params_id,
                             "response_text": full_response,
-                            # "model_name": model_name,  # Removed: Belongs in prompts table
-                            # "model_arguments": arguments_json, # Removed: Belongs in prompts table
-                        }
+                        },
+                        returning="representation",  # type: ignore
                     )
                     .execute()
                 )
-                logger.info(
-                    f"Successfully saved new response for prompt_id: '{prompt_id}'"
-                )
+
+                if response_insert_result.data and len(response_insert_result.data) > 0:
+                    inserted_row = response_insert_result.data[0]
+                    if "response_id" in inserted_row:
+                        new_response_id = inserted_row["response_id"]
+                        logger.info(
+                            f"Successfully saved new response (ID: {new_response_id}) for prompt_id: '{prompt_id}'"
+                        )
+                    else:
+                        logger.error(
+                            f"'response_id' not found in returned data for prompt {prompt_id}"
+                        )
+                        error_occurred = True
+                else:
+                    logger.error(
+                        f"Failed to insert response or get representation for prompt {prompt_id}. Result: {response_insert_result}"
+                    )
+                    error_occurred = True
 
             except Exception as e:
                 logger.exception(
@@ -204,6 +296,25 @@ async def stream_and_save_new_response(
                 yield f"data: {json.dumps({'error': 'Failed to save new response.'})}\n\n"
                 error_occurred = True
 
+        # --- Record the initial view in `view_counts` --- #
+        if supabase and new_response_id and not error_occurred:
+            try:
+                logger.info(
+                    f"Recording initial view for response_id: {new_response_id}"
+                )
+                supabase.table("view_counts").insert(
+                    {"response_id": new_response_id}
+                ).execute()
+                logger.info(
+                    f"Successfully recorded initial view for response_id: {new_response_id}"
+                )
+            except Exception as e:
+                logger.exception(
+                    f"Failed to record initial view for response_id {new_response_id}",
+                    exc_info=e,
+                )
+
+        # --- Send End Event --- #
         if not error_occurred:
             logger.info(
                 f"Successfully streamed and saved new response for prompt_id: '{prompt_id}'"
@@ -271,202 +382,128 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
         )
     # ---------------------------
 
-    truncated_prompt = truncate_prompt(short_description)
-    logger.info(f"Using truncated prompt_text for lookup: '{truncated_prompt}'")
+    # --- Determine Model Parameters --- #
+    # (Define these based on your logic - fixed for now)
+    model_name = "claude-3-5-sonnet-20240620"
+    system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
+    max_tokens = 3500 # GPT 2 token statistics on PG essays as of 2025-04-14
+    # Mean: 3284.29, Median: 2052, Mode: 3292
+    # Min: 104, Max: 17718, SD: 3086.28
+    prompt_text = f"Write a Paul Graham essay about {short_description}"
+    messages = [
+        {
+            "role": "user",
+            "content": prompt_text,  # Use full description for the LLM
+        }
+    ]
+    # --------------------------------- #
 
     try:
-        # Check if prompt_text exists in `prompts` table
-        prompt_resp = (
+        # --- Get or Create Model Params ID --- #
+        params_id = await get_or_create_model_params(
+            model_name, system_prompt, max_tokens
+        )
+        # ------------------------------------- #
+
+        # --- Find or Create Prompt based on short_description --- #
+        prompt_upsert_result = (
             supabase.table("prompts")
-            .select("prompt_id, view_count")
-            .eq("prompt_text", truncated_prompt)
+            .upsert(
+                {"short_description": short_description, "prompt_text": prompt_text},
+                on_conflict="prompt_text",
+                returning="representation",  # type: ignore
+                ignore_duplicates=False,
+            )
+            .execute()
+        )
+
+        if not prompt_upsert_result.data or len(prompt_upsert_result.data) == 0:
+            logger.error(
+                f"Failed to upsert prompt for description: {short_description}"
+            )
+            raise HTTPException(
+                status_code=500, detail="Failed to find or create prompt."
+            )
+
+        prompt_info = prompt_upsert_result.data[0]
+        prompt_id = prompt_info["prompt_id"]
+        prompt_created_at = prompt_info[
+            "created_at"
+        ]  # Example of getting other info if needed
+
+        # Determine if the prompt was newly inserted or if it already existed
+        # This logic might need refinement based on exact upsert behavior / timestamps
+        # A simple check: if created_at is very recent? Or compare count before/after?
+        # For now, let's assume if we *found* a response below, the prompt existed.
+
+        # --- Check for Existing Response --- #
+        # Fetch the latest response for this prompt_id (regardless of params_id used to create it)
+        latest_response_resp = (
+            supabase.table("responses")
+            .select("response_id, response_text")
+            .eq("prompt_id", prompt_id)
+            .order("response_created_at", desc=True)
             .limit(1)
             .execute()
         )
-        existing_prompt = prompt_resp.data
 
-        if existing_prompt:
-            # --- Prompt Exists ---
-            prompt_data = existing_prompt[0]
-            prompt_id = prompt_data["prompt_id"]
-            current_views = prompt_data["view_count"]
+        if latest_response_resp.data:
+            # --- Prompt Existed and has a Response --- #
+            latest_response = latest_response_resp.data[0]
+            latest_response_id = latest_response["response_id"]
+            latest_response_text = latest_response["response_text"]
             logger.info(
-                f"Prompt exists (ID: {prompt_id}). Incrementing view count and fetching latest response."
+                f"Found existing prompt (ID: {prompt_id}) and latest response (ID: {latest_response_id}). Streaming cached response."
             )
 
-            # Increment view count
+            # Record View
             try:
-                supabase.table("prompts").update({"view_count": current_views + 1}).eq(
-                    "prompt_id", prompt_id
+                logger.info(f"Recording view for response_id: {latest_response_id}")
+                supabase.table("view_counts").insert(
+                    {"response_id": latest_response_id}
                 ).execute()
-                logger.info(
-                    f"Incremented view count for prompt_id '{prompt_id}' to {current_views + 1}"
-                )
             except Exception as e:
-                logger.error(
-                    f"Error updating view count for prompt_id '{prompt_id}'", exc_info=e
+                logger.exception(
+                    f"Failed to record view for response_id {latest_response_id}",
+                    exc_info=e,
                 )
 
-            # Fetch the latest response text
-            latest_response_resp = (
-                supabase.table("responses")
-                .select("response_text")
-                .eq("prompt_id", prompt_id)
-                .order("response_created_at", desc=True)
-                .limit(1)
-                .execute()
+            # Stream the cached/latest response
+            async def stream_latest_cached():
+                chunk_size = 20
+                for i in range(0, len(latest_response_text), chunk_size):
+                    chunk = latest_response_text[i : i + chunk_size]
+                    yield f"data: {json.dumps({'text': chunk})}\\n\\n"
+                    await asyncio.sleep(0.01)
+                yield f"data: {json.dumps({'end': True})}\n\n"
+
+            return StreamingResponse(
+                stream_latest_cached(), media_type="text/event-stream"
             )
-
-            if latest_response_resp.data:
-                latest_response_text = latest_response_resp.data[0]["response_text"]
-                logger.info(
-                    f"Found latest response for prompt_id '{prompt_id}'. Streaming it back."
-                )
-
-                # Stream the cached/latest response
-                async def stream_latest_cached():
-                    chunk_size = 20
-                    for i in range(0, len(latest_response_text), chunk_size):
-                        chunk = latest_response_text[i : i + chunk_size]
-                        yield f"data: {json.dumps({'text': chunk})}\n\n"
-                        await asyncio.sleep(0.01)
-                    yield f"data: {json.dumps({'end': True})}\n\n"
-
-                return StreamingResponse(
-                    stream_latest_cached(), media_type="text/event-stream"
-                )
-            else:
-                logger.error(f"Prompt '{prompt_id}' exists, but no responses found!")
-
-                # Option: Generate a new response for this existing prompt?
-                # For now, return error. Could call stream_and_save_new_response(prompt_id, truncated_prompt) here instead.
-                async def no_resp_stream():
-                    yield f"data: {json.dumps({'error': 'Found prompt but no responses available.'})}\n\n"
-
-                return StreamingResponse(
-                    no_resp_stream(), media_type="text/event-stream", status_code=404
-                )
 
         else:
-            # --- Prompt Does Not Exist ---
+            # --- Prompt was Newly Created OR Existed but has NO responses --- #
+            # This happens if the upsert created the prompt, OR if the prompt existed
+            # but its previous responses were deleted (or never created).
             logger.info(
-                f"Prompt_text '{truncated_prompt}' does not exist. Creating new prompt entry."
+                f"Prompt (ID: {prompt_id}) is new or has no existing responses. Generating new response with params_id {params_id}."
             )
-            try:
-                # Insert new prompt
-                model_name = "claude-3-5-sonnet-20240620"
-                system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
-                max_tokens = 2048
-                messages = [
-                    {
-                        "role": "user",
-                        "content": f"Write a Paul Graham essay about {short_description}",  # Use full description for the LLM
-                    }
-                ]
-                # ----------------------------- #
-
-                # Insert new prompt with model details
-                insert_prompt_resp = (
-                    supabase.table("prompts")
-                    .insert(
-                        {
-                            "prompt_text": truncated_prompt,
-                            "short_description": short_description,
-                            "view_count": 1,
-                            "model_name": model_name,  # Add model name here
-                            "model_arguments": messages[0][
-                                "content"
-                            ],  # Add arguments here (Adjust based on desired format)
-                        }
-                    )
-                    .execute()
-                )
-
-                if insert_prompt_resp.data:
-                    new_prompt_id = insert_prompt_resp.data[0]["prompt_id"]
-                    logger.info(
-                        f"Successfully inserted new prompt with ID: {new_prompt_id}"
-                    )
-
-                    # Generate, stream, and save the first response (including model info)
-                    return StreamingResponse(
-                        stream_and_save_new_response(
-                            new_prompt_id,
-                            model_name,
-                            system_prompt,
-                            messages,
-                            max_tokens,
-                        ),
-                        media_type="text/event-stream",
-                    )
-                else:
-                    logger.error(
-                        f"Failed to insert new prompt '{truncated_prompt}'. Response: {insert_prompt_resp}"
-                    )
-                    raise Exception("Failed to create new prompt entry.")
-
-            except Exception as e:
-                # Handle potential race condition on prompt_text unique constraint
-                if "duplicate key value violates unique constraint" in str(
-                    e
-                ) and "prompts_prompt_text_key" in str(e):
-                    logger.warning(
-                        f"Race condition? Prompt_text '{truncated_prompt}' inserted between check/insert. Recovering."
-                    )
-                    recover_resp = (
-                        supabase.table("prompts")
-                        .select("prompt_id")
-                        .eq("prompt_text", truncated_prompt)
-                        .limit(1)
-                        .execute()
-                    )
-                    if recover_resp.data:
-                        recovered_prompt_id = recover_resp.data[0]["prompt_id"]
-                        logger.info(
-                            f"Recovered prompt_id: {recovered_prompt_id}. Generating new response for existing prompt."
-                        )
-
-                        # --- Define LLM Parameters (Race Condition Recovery) --- #
-                        model_name = "claude-3-5-sonnet-20240620"
-                        system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
-                        max_tokens = 2048
-                        messages = [
-                            {
-                                "role": "user",
-                                "content": f"Write a Paul Graham essay about {short_description}",  # Use full description
-                            }
-                        ]
-                        # ----------------------------------------------------- #
-
-                        # Generate a new response and save it, linked to the recovered prompt_id
-                        # NOTE: We don't update the prompt record here as it already exists.
-                        # The model details used for *this specific response* generation are saved
-                        # in the responses table by stream_and_save_new_response.
-                        return StreamingResponse(
-                            stream_and_save_new_response(
-                                recovered_prompt_id,
-                                model_name,
-                                system_prompt,
-                                messages,
-                                max_tokens,
-                            ),
-                            media_type="text/event-stream",
-                        )
-                    else:
-                        logger.error(
-                            f"Race condition recovery failed for prompt_text '{truncated_prompt}'."
-                        )
-                        raise Exception("Failed to create or recover prompt entry.")
-                else:
-                    logger.exception(
-                        f"Error inserting new prompt with text '{truncated_prompt}'",
-                        exc_info=e,
-                    )
-                    raise e  # Re-raise other exceptions
+            # Generate, stream, and save the first response for this prompt using current params
+            return StreamingResponse(
+                stream_and_save_new_response(
+                    prompt_id,  # The ID from the upsert
+                    params_id,  # The ID for the *current* model params
+                    model_name,
+                    system_prompt,
+                    messages,
+                    max_tokens,
+                ),
+                media_type="text/event-stream",
+            )
 
     except Exception as e:
         logger.exception(
-            f"Error processing /ask request for prompt_text '{truncated_prompt}'",
+            f"Error processing /ask request for description '{short_description}'",
             exc_info=e,
         )
 
@@ -480,7 +517,7 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
 
 @app.get("/essays", response_class=JSONResponse)
 async def get_essays(sort_by: str = "time", order: str = "desc"):
-    """Fetches the list of saved prompts, returning short_description."""
+    """Fetches the list of saved prompts and their total view counts."""
     logger.info(f"Received /essays request. Sort by: {sort_by}, Order: {order}")
     if not supabase:
         logger.error("Supabase client not available for /essays request.")
@@ -488,49 +525,131 @@ async def get_essays(sort_by: str = "time", order: str = "desc"):
             content={"error": "Database connection not available."}, status_code=503
         )
 
-    valid_sort_by = {
+    # --- Sorting Logic --- #
+    # Note: Sorting by 'views' requires the aggregated count
+    # We handle sorting *after* fetching and aggregation for simplicity here.
+    # For large datasets, doing sorting in the DB might be better if possible
+    # with Supabase function calls or views.
+    sort_column_map = {
         "time": "created_at",
-        "views": "view_count",
-        "alpha": "short_description",
+        "alpha": "prompt",
+        "views": "view_count",  # We'll use this key after aggregation
     }
-    valid_order = {"asc": True, "desc": False}
-    sort_column = valid_sort_by.get(sort_by, "created_at")
-    ascending = valid_order.get(order, False)
-    descending = not ascending  # Calculate descending flag
+    sort_key = sort_column_map.get(sort_by, "created_at")
+    reverse_sort = order == "desc"
+    # --------------------- #
 
     try:
-        # Query the `prompts` table
-        response = (
+        # --- Query Prompts and Aggregate View Counts --- #
+        # This requires joining prompts -> responses -> view_counts
+        # Using supabase-py directly for joins/counts can be tricky.
+        # An RPC function in Supabase is often the cleaner/more performant way.
+        # --- Option 1: Using RPC (Recommended) --- #
+        # Assumes you create a SQL function `get_prompts_with_views()` in Supabase:
+        # CREATE OR REPLACE FUNCTION get_prompts_with_views()
+        # RETURNS TABLE(prompt_id UUID, short_description TEXT, created_at TIMESTAMPTZ, view_count BIGINT)
+        # LANGUAGE sql
+        # AS $$
+        #     SELECT
+        #         p.prompt_id,
+        #         p.short_description,
+        #         p.created_at,
+        #         count(vc.view_id)::BIGINT as view_count
+        #     FROM prompts p
+        #     -- Join to find *any* response for the prompt
+        #     LEFT JOIN responses r ON p.prompt_id = r.prompt_id
+        #     -- Join views related to those responses
+        #     LEFT JOIN view_counts vc ON r.response_id = vc.response_id
+        #     GROUP BY p.prompt_id, p.short_description, p.created_at;
+        # $$;
+        #
+        # response = supabase.rpc('get_prompts_with_views', {}).execute()
+        # logger.info(f"Fetched {len(response.data)} prompts via RPC.")
+        # prompts_data = response.data # Already contains view_count
+
+        # --- Option 2: Attempting with supabase-py (Less Ideal/More Complex) --- #
+        # Fetch all prompts first
+        prompts_resp = (
             supabase.table("prompts")
-            .select(
-                "short_description, created_at, view_count", count=CountMethod.exact
-            )  # Keep count="exact" for now, monitor Supabase docs if needed
-            .order(
-                sort_column, desc=descending
-            )  # Use desc parameter instead of ascending
+            .select("prompt_id, short_description, created_at")
+            .execute()
+        )
+        if not prompts_resp.data:
+            return JSONResponse(content=[])
+
+        prompts_map = {p["prompt_id"]: p for p in prompts_resp.data}
+        prompt_ids = list(prompts_map.keys())
+
+        # Fetch response IDs linked to these prompts
+        responses_ids_resp = (
+            supabase.table("responses")
+            .select("response_id")
+            .in_("prompt_id", prompt_ids)
+            .execute()
+        )
+        response_ids = (
+            [r["response_id"] for r in responses_ids_resp.data]
+            if responses_ids_resp.data
+            else []
+        )
+
+        # Fetch view counts for these response IDs
+        views_resp = (
+            supabase.table("view_counts")
+            .select("response_id, view_id")
+            .in_("response_id", response_ids)
             .execute()
         )
 
-        logger.info(f"Fetched {response.count} prompts from database.")
-        prompts_data = []
-        if response.data:
-            for row in response.data:
-                created_at_iso = (
-                    row["created_at"].isoformat() if row.get("created_at") else None
-                )
-                prompts_data.append(
-                    {
-                        "prompt": row.get("short_description"),  # Use short_description
-                        "created_at": created_at_iso,
-                        "view_count": row.get("view_count"),
-                    }
-                )
-            return JSONResponse(content=prompts_data)
-        else:
-            return JSONResponse(content=[])
+        views_per_response: dict[str, int] = {}  # Type hint added
+        if views_resp.data:
+            for view in views_resp.data:
+                resp_id = view["response_id"]
+                views_per_response[resp_id] = views_per_response.get(resp_id, 0) + 1
+
+        # Fetch responses to link prompts to view counts
+        responses_linking_resp = (
+            supabase.table("responses")
+            .select("prompt_id, response_id")
+            .in_("prompt_id", prompt_ids)
+            .execute()
+        )
+
+        views_per_prompt = {pid: 0 for pid in prompt_ids}
+        if responses_linking_resp.data:
+            for resp in responses_linking_resp.data:
+                prompt_id = resp["prompt_id"]
+                response_id = resp["response_id"]
+                views_per_prompt[prompt_id] += views_per_response.get(response_id, 0)
+
+        # Combine data
+        final_data = []
+        for pid, prompt_info in prompts_map.items():
+            created_at_iso = (
+                prompt_info["created_at"].isoformat()
+                if prompt_info.get("created_at")
+                else None
+            )
+            final_data.append(
+                {
+                    "prompt": prompt_info.get("short_description"),
+                    "created_at": created_at_iso,
+                    "view_count": views_per_prompt.get(pid, 0),
+                }
+            )
+        logger.info(f"Processed {len(final_data)} prompts with aggregated views.")
+        # -------------------------------------------------- #
+
+        # Sort results in Python
+        final_data.sort(
+            key=lambda x: x.get(sort_key) or (0 if sort_key == "view_count" else " "),
+            reverse=reverse_sort,
+        )
+
+        return JSONResponse(content=final_data)
 
     except Exception as e:
-        logger.exception("Error fetching prompts from Supabase", exc_info=e)
+        logger.exception("Error fetching prompts/views from Supabase", exc_info=e)
         return JSONResponse(
             content={"error": "Failed to fetch prompts."}, status_code=500
         )
