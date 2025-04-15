@@ -412,10 +412,10 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
             console.log("Got prompt_id:", prompt_id);
             // -------------------------------------------------------------------------------------- //
 
-            // --- Check for Existing Response (Latest) ---
+            // --- Check for Existing Response (Latest AND Matching Params) ---
             const { data: latestResponseData, error: responseError } = await supabase
                 .from('responses')
-                .select('response_id, response_text, params_id')
+                .select('response_id, response_text, params_id') // Ensure params_id is selected
                 .eq('prompt_id', prompt_id)
                 .order('response_created_at', { ascending: false })
                 .limit(1)
@@ -423,28 +423,19 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
 
             if (responseError) throw responseError;
 
-            if (latestResponseData) {
+            // Check if response exists AND if its params_id matches the current request's params_id
+            if (latestResponseData && latestResponseData.params_id === params_id) {
                 // --- Stream Cached Response Line by Line ---
-                console.log("Found existing response:", latestResponseData.response_id);
+                console.log(`Found existing response (ID: ${latestResponseData.response_id}) with matching params_id: ${params_id}`);
                 const response_id = latestResponseData.response_id;
                 const cachedText = latestResponseData.response_text || "";
-                const cachedParamsId = latestResponseData.params_id;
+                const cachedParamsId = latestResponseData.params_id; // This will be same as params_id
 
                 // --- Fetch metadata for cached response ---
-                let metadata = { model_name, system_prompt, max_tokens, prompt_text }; // Default to current request's params
+                let metadata = { model_name, system_prompt, max_tokens, prompt_text }; // Start with current request's params (which match)
                 try {
-                    if (cachedParamsId) {
-                        const { data: cachedParamsData, error: cachedParamsError } = await supabase
-                            .from('model_params')
-                            .select('model_name, system_prompt, max_tokens')
-                            .eq('params_id', cachedParamsId)
-                            .maybeSingle();
-                        if (cachedParamsError) throw cachedParamsError;
-                        if (cachedParamsData) {
-                            metadata = { ...metadata, ...cachedParamsData }; // Override with cached params if found
-                        }
-                    }
-                    // Fetch the actual prompt_text associated with the prompt_id
+                    // Since params_id matches, we already have the correct model_name, system_prompt, max_tokens.
+                    // We still need to fetch the specific prompt_text associated with the prompt_id as it might differ from short_description if template changed.
                     const { data: cachedPromptData, error: cachedPromptError } = await supabase
                         .from('prompts')
                         .select('prompt_text')
@@ -458,9 +449,8 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                     console.log("Metadata for cached response:", metadata);
                     await writer.write({ metadata }); // Send metadata event first
                 } catch (metaError: any) {
-                    console.error("Error fetching metadata for cached response:", metaError);
-                    // Proceed without metadata event or send an error? Decide behavior.
-                    // For now, just log and continue streaming text.
+                    console.error("Error fetching prompt_text for cached response metadata:", metaError);
+                    // Log and continue streaming text even if prompt_text fetch fails.
                 }
                 // -----------------------------------------
 
@@ -493,8 +483,15 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                 console.log("Finished streaming cached response.");
 
             } else {
-                // --- Generate New Response via Anthropic ---
-                console.log("No existing response found. Calling Anthropic...");
+                // --- Generate New Response (No suitable cached response found) ---
+                if (latestResponseData) {
+                    console.log(`Found existing response (ID: ${latestResponseData.response_id}), but params_id (${latestResponseData.params_id}) does not match current (${params_id}). Regenerating...`);
+                } else {
+                    console.log("No existing response found for this prompt_id. Generating new response...");
+                }
+                // ------------------------------------------------------------------
+
+                console.log("Calling Anthropic...");
                 const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt_text }];
                 let fullResponseText = "";
                 let llmStreamSuccessful = false;
