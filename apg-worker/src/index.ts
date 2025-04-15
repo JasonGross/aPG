@@ -343,35 +343,76 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
     (async () => {
         const writer = writable.getWriter();
         try {
-            // --- Get or Create Model Params ---
-            const { data: paramsData, error: paramsError } = await supabase
+            // --- Get or Create Model Params (Replaced Upsert) ---
+            let params_id: string;
+            console.log("Checking for existing model_params...");
+            const { data: existingParams, error: paramsSelectError } = await supabase
                 .from('model_params')
-                .upsert(
-                    { model_name, system_prompt, max_tokens },
-                    { onConflict: 'model_name, system_prompt, max_tokens', ignoreDuplicates: false } // Ensure conflict returns data
-                )
                 .select('params_id')
-                .single(); // Expect single row
+                .match({ model_name, system_prompt, max_tokens })
+                .maybeSingle(); // Use maybeSingle to handle null result gracefully
 
-            if (paramsError || !paramsData) throw paramsError || new Error("Failed to upsert/find model_params.");
-            const params_id = paramsData.params_id;
-            console.log("Got params_id:", params_id);
+            if (paramsSelectError) {
+                console.error("Error selecting model_params:", paramsSelectError);
+                throw new Error(`Database error checking model parameters: ${paramsSelectError.message}`);
+            }
 
-            // --- Find or Create Prompt ---
-            const { data: promptData, error: promptError } = await supabase
+            if (existingParams) {
+                params_id = existingParams.params_id;
+                console.log("Found existing model_params_id:", params_id);
+            } else {
+                console.log("No existing model_params found, creating new one...");
+                const { data: newParamsData, error: paramsInsertError } = await supabase
+                    .from('model_params')
+                    .insert({ model_name, system_prompt, max_tokens })
+                    .select('params_id')
+                    .single(); // Expect single row after insert
+
+                if (paramsInsertError || !newParamsData) {
+                    console.error("Error inserting new model_params:", paramsInsertError);
+                    throw new Error(`Database error creating model parameters: ${paramsInsertError?.message || 'Insert failed'}`);
+                }
+                params_id = newParamsData.params_id;
+                console.log("Created new model_params_id:", params_id);
+            }
+            // ---------------------------------------------------- //
+
+            // --- Find or Create Prompt (Replaced Upsert) ---
+            let prompt_id: string;
+            // let prompt_created_at: string; // Can get this if needed
+            console.log("Checking for existing prompt...");
+            const { data: existingPrompt, error: promptSelectError } = await supabase
                 .from('prompts')
-                .upsert(
-                    { short_description, prompt_text },
-                    { onConflict: 'prompt_text', ignoreDuplicates: false }
-                )
                 .select('prompt_id, created_at')
-                .single(); // Expect single row
+                .eq('prompt_text', prompt_text)
+                .maybeSingle();
 
-            if (promptError || !promptData) throw promptError || new Error("Failed to upsert/find prompt.");
-            const prompt_id = promptData.prompt_id;
-            const prompt_created_at = promptData.created_at; // Use for logic if needed
-            console.log("Got prompt_id:", prompt_id);
+            if (promptSelectError) {
+                console.error("Error selecting prompt:", promptSelectError);
+                throw new Error(`Database error checking prompt: ${promptSelectError.message}`);
+            }
 
+            if (existingPrompt) {
+                prompt_id = existingPrompt.prompt_id;
+                // prompt_created_at = existingPrompt.created_at;
+                console.log("Found existing prompt_id:", prompt_id);
+            } else {
+                console.log("No existing prompt found, creating new one...");
+                const { data: newPromptData, error: promptInsertError } = await supabase
+                    .from('prompts')
+                    .insert({ short_description, prompt_text })
+                    .select('prompt_id, created_at')
+                    .single();
+
+                if (promptInsertError || !newPromptData) {
+                    console.error("Error inserting new prompt:", promptInsertError);
+                    throw new Error(`Database error creating prompt: ${promptInsertError?.message || 'Insert failed'}`);
+                }
+                prompt_id = newPromptData.prompt_id;
+                // prompt_created_at = newPromptData.created_at;
+                console.log("Created new prompt_id:", prompt_id);
+            }
+            // ---------------------------------------------------- //
 
             // --- Check for Existing Response (Latest) ---
             const { data: latestResponseData, error: responseError } = await supabase
