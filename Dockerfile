@@ -7,21 +7,17 @@ WORKDIR /code
 # Copy the pyproject.toml file into the container at /code
 COPY ./pyproject.toml /code/pyproject.toml
 
-# Install the project and its dependencies using pyproject.toml
-# --no-cache-dir: Disables the cache to keep image size down
-# --upgrade pip: Ensures pip is up-to-date
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir .
-
 # Copy the rest of the application code (the 'app' directory contents)
 # into the container at /code/app
 # Adjust if your Python code is not in an 'app' subfolder
 COPY ./app /code/app
-# If main.py is at the root with static/ and templates/
-# COPY ./main.py /code/main.py
-# COPY ./static /code/static
-# COPY ./templates /code/templates
-# Ensure your paths match your project structure. Assuming main.py is in 'app/'
+
+# Install the project and its dependencies using pyproject.toml
+# --no-cache-dir: Disables the cache to keep image size down
+# --upgrade pip: Ensures pip is up-to-date
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e /code/app
+
 
 # Make port 8000 available to the world outside this container
 # Hugging Face Spaces expects the app to listen on port 7860 by default,
