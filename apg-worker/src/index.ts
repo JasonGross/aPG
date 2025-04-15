@@ -342,7 +342,7 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
     // Start processing async
     (async () => {
         const writer = writable.getWriter();
-        let streamErrorOccurred = false; // Flag to track if errors were sent
+        let streamErrorOccurred = false;
         try {
             // --- DB Operations: Get/Create Params & Prompt (Keep existing select/insert logic) ---
             let params_id: string;
@@ -421,26 +421,36 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                 .limit(1)
                 .maybeSingle();
 
-            if (responseError) throw responseError; // Propagate DB error
+            if (responseError) throw responseError;
 
             if (latestResponseData) {
-                // --- Stream Cached Response ---
+                // --- Stream Cached Response in Chunks ---
                 console.log("Found existing response:", latestResponseData.response_id);
                 const response_id = latestResponseData.response_id;
-                const cachedText = latestResponseData.response_text;
-                // Record View (Best effort)
+                const cachedText = latestResponseData.response_text || ""; // Ensure cachedText is a string
+
+                // Record View (Best effort - fire and forget)
                 supabase.from('view_counts').insert({ response_id }).then(({ error: viewError }) => {
                     if (viewError) console.error("Failed to record view for cached response:", viewError);
                 });
-                // Stream the cached text
-                // Log the cached response being streamed
-                console.log("Streaming cached response:", {
-                    response_id: latestResponseData.response_id,
-                    text_length: cachedText.length,
-                    text_preview: cachedText.substring(0, 1000) + "..." // Log first 1000 chars
-                });
-                await writer.write(cachedText);
-                await writer.write({ end: true }); // Signal end immediately for cache
+
+                // Chunking parameters
+                const chunkSize = 50; // Send 50 characters at a time
+                const delayMs = 15;   // Wait 15ms between chunks
+
+                console.log(`Streaming cached response (ID: ${response_id}) in chunks of ${chunkSize}...`);
+
+                for (let i = 0; i < cachedText.length; i += chunkSize) {
+                    const chunk = cachedText.substring(i, i + chunkSize);
+                    await writer.write(chunk); // Write the chunk (encoder wraps in JSON)
+                    // Add a small delay to simulate streaming pace
+                    if (delayMs > 0) {
+                        await new Promise(resolve => setTimeout(resolve, delayMs));
+                    }
+                }
+                // -----------------------------------------
+
+                await writer.write({ end: true }); // Signal end after all chunks are sent
                 console.log("Finished streaming cached response.");
 
             } else {
@@ -462,18 +472,17 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                         if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
                             const textChunk = event.delta.text;
                             fullResponseText += textChunk;
-                            await writer.write(textChunk); // Stream chunk
+                            await writer.write(textChunk);
                         }
                         if (event.type === 'message_stop') {
                             console.log("Anthropic stream stopped.");
-                            llmStreamSuccessful = true; // Mark LLM stream as successful
+                            llmStreamSuccessful = true;
                         }
                     }
                 } catch (llmError: any) {
                     console.error("Error during Anthropic stream:", llmError);
                     streamErrorOccurred = true;
                     await writer.write({ error: `LLM stream error: ${llmError.message}` });
-                    // Do not proceed to save if LLM failed
                     llmStreamSuccessful = false;
                 }
 
