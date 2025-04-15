@@ -16,7 +16,7 @@ COPY ./app /code/app
 # --no-cache-dir: Disables the cache to keep image size down
 # --upgrade pip: Ensures pip is up-to-date
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e /code/app
+    pip install --no-cache-dir -e /code
 
 
 # Make port 8000 available to the world outside this container
