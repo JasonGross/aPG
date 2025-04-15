@@ -415,7 +415,7 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
             // --- Check for Existing Response (Latest) ---
             const { data: latestResponseData, error: responseError } = await supabase
                 .from('responses')
-                .select('response_id, response_text')
+                .select('response_id, response_text, params_id')
                 .eq('prompt_id', prompt_id)
                 .order('response_created_at', { ascending: false })
                 .limit(1)
@@ -428,6 +428,41 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                 console.log("Found existing response:", latestResponseData.response_id);
                 const response_id = latestResponseData.response_id;
                 const cachedText = latestResponseData.response_text || "";
+                const cachedParamsId = latestResponseData.params_id;
+
+                // --- Fetch metadata for cached response ---
+                let metadata = { model_name, system_prompt, max_tokens, prompt_text }; // Default to current request's params
+                try {
+                    if (cachedParamsId) {
+                        const { data: cachedParamsData, error: cachedParamsError } = await supabase
+                            .from('model_params')
+                            .select('model_name, system_prompt, max_tokens')
+                            .eq('params_id', cachedParamsId)
+                            .maybeSingle();
+                        if (cachedParamsError) throw cachedParamsError;
+                        if (cachedParamsData) {
+                            metadata = { ...metadata, ...cachedParamsData }; // Override with cached params if found
+                        }
+                    }
+                    // Fetch the actual prompt_text associated with the prompt_id
+                    const { data: cachedPromptData, error: cachedPromptError } = await supabase
+                        .from('prompts')
+                        .select('prompt_text')
+                        .eq('prompt_id', prompt_id)
+                        .single(); // Expecting one prompt
+                    if (cachedPromptError) throw cachedPromptError;
+                    if (cachedPromptData) {
+                        metadata.prompt_text = cachedPromptData.prompt_text; // Update prompt_text specifically
+                    }
+
+                    console.log("Metadata for cached response:", metadata);
+                    await writer.write({ metadata }); // Send metadata event first
+                } catch (metaError: any) {
+                    console.error("Error fetching metadata for cached response:", metaError);
+                    // Proceed without metadata event or send an error? Decide behavior.
+                    // For now, just log and continue streaming text.
+                }
+                // -----------------------------------------
 
                 // Record View (Best effort)
                 supabase.from('view_counts').insert({ response_id }).then(({ error: viewError }) => {
@@ -494,6 +529,12 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                 if (llmStreamSuccessful) {
                     try {
                         console.log("Anthropic stream finished successfully. Saving response...");
+
+                        // --- Construct metadata ---
+                        const metadata = { model_name, system_prompt, max_tokens, prompt_text };
+                        console.log("Metadata for new response:", metadata);
+                        // ------------------------
+
                         const { data: insertResponseData, error: insertError } = await supabase
                             .from('responses')
                             .insert({ prompt_id, params_id, response_text: fullResponseText })
@@ -511,7 +552,10 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                             if (viewError) console.error("Failed to record initial view:", viewError);
                         });
 
-                        // Signal end ONLY after successful save
+                        // Send metadata BEFORE the end signal
+                        await writer.write({ metadata });
+
+                        // Signal end ONLY after successful save and metadata send
                         await writer.write({ end: true });
                         console.log("Finished streaming and saving new response.");
 

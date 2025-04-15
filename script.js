@@ -235,6 +235,18 @@ document.addEventListener('DOMContentLoaded', () => {
         // --- Check Cache ---
         if (responseCache[prompt]) {
             console.log("Loading response from cache for:", prompt);
+            const cachedData = responseCache[prompt];
+
+            // Check cache format (simple string vs object with text/metadata)
+            const cachedRawText = typeof cachedData === 'string' ? cachedData : cachedData.text;
+            const cachedMetadata = typeof cachedData === 'object' ? cachedData.metadata : null; // Get metadata if available
+
+            if (cachedMetadata) {
+                console.log("Using cached metadata:", cachedMetadata);
+            } else {
+                console.log("No metadata found in cache for this entry.");
+            }
+
             // Basic UI update for loading
             submitButton.textContent = 'Loading Cached...';
             loadingIndicator.classList.remove('hidden');
@@ -245,7 +257,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Use a timeout to allow UI to update before rendering
             setTimeout(() => {
-                const cachedRawText = responseCache[prompt];
                 responseOutput.innerHTML = renderFormattedText(cachedRawText);
                 finalizeUI(false);
                 console.log("Finished displaying cached response.");
@@ -294,14 +305,15 @@ document.addEventListener('DOMContentLoaded', () => {
             if (response.headers.get('content-type')?.includes('text/event-stream')) {
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
+                let receivedMetadata = null; // Variable to store metadata from stream
 
                 reader.read().then(function processText({ done, value }) {
                     if (done) {
                         console.log("Stream complete.");
-                        // Cache the RAW response on successful completion
+                        // Cache the RAW response and metadata on successful completion
                         if (!errorMessage.textContent) { // Check if an error message was displayed during stream
-                            responseCache[prompt] = rawFullResponseAccumulator;
-                            console.log("Response cached for:", prompt);
+                            responseCache[prompt] = { text: rawFullResponseAccumulator, metadata: receivedMetadata || {} };
+                            console.log("Response and metadata cached for:", prompt);
                             finalizeUI(true); // Finalize UI (will fetch essays)
                         } else {
                             finalizeUI(false); // Finalize UI but don't refresh list if errors occurred
@@ -315,7 +327,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (line.startsWith('data:')) {
                             try {
                                 const data = JSON.parse(line.substring(5).trim());
-                                if (data.text) {
+                                if (data.metadata) { // --- Handle metadata event ---
+                                    console.log("Received metadata:", data.metadata);
+                                    receivedMetadata = data.metadata; // Store it
+                                } else if (data.text) { // --- Handle text event ---
                                     // Accumulate RAW text for cache
                                     rawFullResponseAccumulator += data.text;
 
@@ -363,10 +378,10 @@ document.addEventListener('DOMContentLoaded', () => {
                                     reader.cancel(); // Stop reading on error
                                 } else if (data.end) {
                                     console.log("SSE Stream ended by server.");
-                                    // Cache the RAW response on server end signal (if no prior error)
+                                    // Cache the RAW response and metadata on server end signal (if no prior error)
                                     if (!errorMessage.textContent) {
-                                        responseCache[prompt] = rawFullResponseAccumulator;
-                                        console.log("Response cached for:", prompt);
+                                        responseCache[prompt] = { text: rawFullResponseAccumulator, metadata: receivedMetadata || {} };
+                                        console.log("Response and metadata cached for:", prompt);
                                         finalizeUI(true); // Finalize UI
                                     } else {
                                         finalizeUI(false);
@@ -393,8 +408,9 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 // Handle non-streaming response
                 const rawText = await response.text();
-                responseCache[prompt] = rawText; // Cache raw text
-                console.log("Non-streamed response cached for:", prompt);
+                // Cache raw text in the new object format, but without metadata
+                responseCache[prompt] = { text: rawText, metadata: null };
+                console.log("Non-streamed response cached (no metadata) for:", prompt);
                 responseOutput.innerHTML = renderFormattedText(rawText); // Render formatted
                 finalizeUI(true); // Finalize UI
             }
