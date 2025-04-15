@@ -340,6 +340,8 @@ document.addEventListener('DOMContentLoaded', () => {
                                         formattedChunkHTML = escapedChunk.replace(/\n+/g, '<br><br>');
                                     }
                                     responseOutput.innerHTML += formattedChunkHTML;
+                                    // Replace multiple consecutive <br><br> with a single <br><br>
+                                    responseOutput.innerHTML = responseOutput.innerHTML.replace(/<br>(<br>)+/g, '<br><br>');
                                     // --------------------------------------------- //
                                 } else if (data.error) {
                                     console.error("SSE Error:", data.error);
