@@ -77,10 +77,35 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log(`Rendering essay ${index + 1}:`, essay);
             const li = document.createElement('li');
             const promptText = essay.prompt ? essay.prompt : '[No prompt text]';
-            const viewCount = essay.view_count ?? 'N/A'; // Use nullish coalescing
-            li.textContent = `${promptText} (Views: ${viewCount})`; // Display view count
+            const viewCount = essay.view_count ?? 0; // Get view count, default to 0
+
+            // Create span for prompt text
+            const promptSpan = document.createElement('span');
+            promptSpan.textContent = promptText;
+
+            // Create span for view count (initially hidden)
+            const viewCountSpan = document.createElement('span');
+            viewCountSpan.classList.add('view-count-display', 'ml-2', 'text-gray-500'); // Add styling
+            viewCountSpan.textContent = `(Views: ${viewCount})`;
+            viewCountSpan.style.display = 'none'; // Hide by default
+
+            // Append spans to list item
+            li.appendChild(promptSpan);
+            li.appendChild(viewCountSpan);
 
             li.classList.add('cursor-pointer', 'hover:text-orange-700');
+
+            // Event listeners for hover effect
+            li.addEventListener('mouseenter', () => {
+                if (currentSort.field === 'views') {
+                    viewCountSpan.style.display = 'inline'; // Show on hover if sorting by views
+                }
+            });
+
+            li.addEventListener('mouseleave', () => {
+                viewCountSpan.style.display = 'none'; // Always hide when mouse leaves
+            });
+
             li.addEventListener('click', () => {
                 promptInput.value = essay.prompt;
                 promptInput.dispatchEvent(new Event('input'));
