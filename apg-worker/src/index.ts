@@ -24,8 +24,8 @@ const ALLOWED_ORIGINS: string[] = [
     'https://askpg.ai',
     'https://askpaulgraham.ai',
     // Add localhost for local development if needed:
-    // 'http://localhost:8000', // Example port
-    // 'http://127.0.0.1:8000'
+    'http://localhost:8000', // Example port
+    'http://127.0.0.1:8000'
 ];
 
 const BASE_CORS_HEADERS = {
