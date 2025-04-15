@@ -598,58 +598,17 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
 
 
 @app.get("/essays", response_class=JSONResponse)
-async def get_essays(sort_by: str = "time", order: str = "desc"):
-    """Fetches the list of saved prompts and their total view counts."""
-    logger.info(f"Received /essays request. Sort by: {sort_by}, Order: {order}")
+async def get_essays():
+    """Fetches the list of saved prompts and their total view counts (unsorted)."""
+    logger.info("Received /essays request.")
     if not supabase:
         logger.error("Supabase client not available for /essays request.")
         return JSONResponse(
             content={"error": "Database connection not available."}, status_code=503
         )
 
-    # --- Sorting Logic --- #
-    # Note: Sorting by 'views' requires the aggregated count
-    # We handle sorting *after* fetching and aggregation for simplicity here.
-    # For large datasets, doing sorting in the DB might be better if possible
-    # with Supabase function calls or views.
-    sort_column_map = {
-        "time": "created_at",
-        "alpha": "prompt",
-        "views": "view_count",  # We'll use this key after aggregation
-    }
-    sort_key = sort_column_map.get(sort_by, "created_at")
-    reverse_sort = order == "desc"
-    # --------------------- #
-
     try:
-        # --- Query Prompts and Aggregate View Counts --- #
-        # This requires joining prompts -> responses -> view_counts
-        # Using supabase-py directly for joins/counts can be tricky.
-        # An RPC function in Supabase is often the cleaner/more performant way.
-        # --- Option 1: Using RPC (Recommended) --- #
-        # Assumes you create a SQL function `get_prompts_with_views()` in Supabase:
-        # CREATE OR REPLACE FUNCTION get_prompts_with_views()
-        # RETURNS TABLE(prompt_id UUID, short_description TEXT, created_at TIMESTAMPTZ, view_count BIGINT)
-        # LANGUAGE sql
-        # AS $$
-        #     SELECT
-        #         p.prompt_id,
-        #         p.short_description,
-        #         p.created_at,
-        #         count(vc.view_id)::BIGINT as view_count
-        #     FROM prompts p
-        #     -- Join to find *any* response for the prompt
-        #     LEFT JOIN responses r ON p.prompt_id = r.prompt_id
-        #     -- Join views related to those responses
-        #     LEFT JOIN view_counts vc ON r.response_id = vc.response_id
-        #     GROUP BY p.prompt_id, p.short_description, p.created_at;
-        # $$;
-        #
-        # response = supabase.rpc('get_prompts_with_views', {}).execute()
-        # logger.info(f"Fetched {len(response.data)} prompts via RPC.")
-        # prompts_data = response.data # Already contains view_count
-
-        # --- Option 2: Attempting with supabase-py (Less Ideal/More Complex) --- #
+        # --- Query Prompts and Aggregate View Counts (Using Option 2 Logic) --- #
         # Fetch all prompts first
         prompts_resp = (
             supabase.table("prompts")
@@ -750,31 +709,12 @@ async def get_essays(sort_by: str = "time", order: str = "desc"):
         logger.info(f"Processed {len(final_data)} prompts with aggregated views.")
         # -------------------------------------------------- #
 
-        # --- Sort results in Python --- #
-        # Define sort key functions
-        def get_sort_key(item):
-            if sort_key == "created_at":
-                # Handle None values appropriately for sorting
-                dt_val = item.get("_created_at_dt")
-                if dt_val is None:
-                    # Place None values at the beginning if ascending, end if descending
-                    return datetime.min if not reverse_sort else datetime.max
-                return dt_val
-            elif sort_key == "prompt":
-                return item.get("prompt") or ""
-            elif sort_key == "view_count":
-                return item.get("view_count") or 0
-            else:  # Default to created_at if sort_key is invalid
-                dt_val = item.get("_created_at_dt")
-                if dt_val is None:
-                    return datetime.min if not reverse_sort else datetime.max
-                return dt_val
-
-        final_data.sort(key=get_sort_key, reverse=reverse_sort)
-
-        # Remove the internal sorting key before returning
+        # --- Remove Python Sorting --- #
+        # Results are returned unsorted
+        # --- Remove internal sorting key --- #
         for item in final_data:
-            del item["_created_at_dt"]
+            if "_created_at_dt" in item:
+                del item["_created_at_dt"]
         # ------------------------------ #
 
         return JSONResponse(content=final_data)

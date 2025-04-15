@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSort = { field: 'time', order: 'desc' }; // Default sort
     let eventSource = null; // To hold the EventSource connection
     let isFirstChunk = false; // Flag to track the first text chunk
+    let allEssays = []; // Store all fetched essays locally
 
     // --- Character Counter ---
     promptInput.addEventListener('input', () => {
@@ -21,57 +22,103 @@ document.addEventListener('DOMContentLoaded', () => {
         charCount.textContent = `${count} / 70 characters`;
     });
 
-    // --- Fetch and Render Essays ---
-    async function fetchEssays(sortBy = 'time', order = 'desc') {
-        console.log(`Fetching essays: sort=${sortBy}, order=${order}`); // Log fetch start
-        essaysList.innerHTML = '<li class="text-gray-400">Loading essays...</li>'; // Show loading state
+    // --- Render Essays (Handles Sorting and DOM Update) ---
+    function renderEssays(essays) {
+        console.log(`Rendering essays. Current sort: ${currentSort.field} ${currentSort.order}`);
+        essaysList.innerHTML = ''; // Clear list
+
+        if (!Array.isArray(essays)) {
+            console.error("Invalid data provided to renderEssays. Expected an array.", essays);
+            essaysList.innerHTML = '<li class="text-red-500">Error displaying essays.</li>';
+            return;
+        }
+
+        if (essays.length === 0) {
+            essaysList.innerHTML = '<li class="text-gray-500">No essays found yet.</li>';
+            return;
+        }
+
+        // --- Client-Side Sorting --- //
+        const sortedEssays = [...essays].sort((a, b) => {
+            let valA, valB;
+
+            switch (currentSort.field) {
+                case 'alpha':
+                    valA = a.prompt?.toLowerCase() || '';
+                    valB = b.prompt?.toLowerCase() || '';
+                    break;
+                case 'views':
+                    valA = a.view_count ?? 0;
+                    valB = b.view_count ?? 0;
+                    break;
+                case 'time':
+                default:
+                    // Handle potentially null or invalid date strings
+                    valA = a.created_at ? new Date(a.created_at).getTime() : 0;
+                    valB = b.created_at ? new Date(b.created_at).getTime() : 0;
+                    if (isNaN(valA)) valA = 0; // Fallback for invalid dates
+                    if (isNaN(valB)) valB = 0;
+                    break;
+            }
+
+            let comparison = 0;
+            if (valA > valB) {
+                comparison = 1;
+            } else if (valA < valB) {
+                comparison = -1;
+            }
+
+            return currentSort.order === 'desc' ? (comparison * -1) : comparison;
+        });
+        // ------------------------- //
+
+        console.log("Rendering sorted essays...");
+        sortedEssays.forEach((essay, index) => {
+            console.log(`Rendering essay ${index + 1}:`, essay);
+            const li = document.createElement('li');
+            const promptText = essay.prompt ? essay.prompt : '[No prompt text]';
+            const viewCount = essay.view_count ?? 'N/A'; // Use nullish coalescing
+            li.textContent = `${promptText} (Views: ${viewCount})`; // Display view count
+
+            li.classList.add('cursor-pointer', 'hover:text-orange-700');
+            li.addEventListener('click', () => {
+                promptInput.value = essay.prompt;
+                promptInput.dispatchEvent(new Event('input'));
+                promptForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            });
+
+            essaysList.appendChild(li);
+            console.log(`Appended item ${index + 1} to the list.`);
+        });
+        console.log("Finished rendering essays.");
+    }
+
+    // --- Fetch Essays (Only Fetches, Does Not Sort/Render) ---
+    async function fetchEssays() {
+        console.log(`Fetching all essays from backend...`);
+        // Show loading state in the list while fetching
+        essaysList.innerHTML = '<li class="text-gray-400">Loading essays...</li>';
         try {
-            const response = await fetch(`/essays?sort_by=${sortBy}&order=${order}`);
+            // Fetch from the simplified endpoint (no sort params)
+            const response = await fetch(`/essays`);
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
             const essays = await response.json();
-            console.log("Fetched essays data:", essays); // Log the raw fetched data
-
-            essaysList.innerHTML = ''; // Clear list
+            console.log("Fetched essays data:", essays);
 
             if (!Array.isArray(essays)) {
-                console.error("Invalid data received from /essays endpoint. Expected an array.", essays);
+                console.error("Invalid data received from /essays. Expected an array.", essays);
                 throw new Error("Received invalid data from server.");
             }
 
-            if (essays.length === 0) {
-                essaysList.innerHTML = '<li class="text-gray-500">No essays found yet.</li>';
-            } else {
-                console.log("Rendering essays..."); // Log before starting loop
-                essays.forEach((essay, index) => {
-                    console.log(`Rendering essay ${index + 1}:`, essay); // Log each essay object
-                    const li = document.createElement('li');
-                    // Use essay.prompt, provide fallback if null/undefined
-                    const promptText = essay.prompt ? essay.prompt : '[No prompt text]';
-                    li.textContent = promptText;
-                    // Optional: Add view count or date (add checks for null values)
-                    // const createdAt = essay.created_at ? new Date(essay.created_at).toLocaleDateString() : 'N/A';
-                    // const viewCount = essay.view_count !== undefined ? essay.view_count : 'N/A';
-                    // li.textContent += ` (Views: ${viewCount}, Created: ${createdAt})`;
+            allEssays = essays; // Store fetched essays
+            renderEssays(allEssays); // Render the list with current sort
 
-                    // Make the list item clickable to load the prompt
-                    li.classList.add('cursor-pointer', 'hover:text-orange-700');
-                    li.addEventListener('click', () => {
-                        // Set the input value and simulate submission
-                        promptInput.value = essay.prompt; // Use the original prompt text
-                        promptInput.dispatchEvent(new Event('input')); // Update char count
-                        promptForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-                    });
-
-                    essaysList.appendChild(li);
-                    console.log(`Appended item ${index + 1} to the list.`); // Confirm appendChild worked
-                });
-                console.log("Finished rendering essays."); // Log after loop completes
-            }
         } catch (error) {
             console.error('Error fetching essays:', error);
             essaysList.innerHTML = '<li class="text-red-500">Failed to load essays.</li>';
+            allEssays = []; // Clear local store on error
         }
     }
 
@@ -127,8 +174,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 reader.read().then(function processText({ done, value }) {
                     if (done) {
                         console.log("Stream complete");
-                        // Re-fetch essays list to include the new one (if generated)
-                        fetchEssays(currentSort.field, currentSort.order);
+                        // Re-fetch all essays to include the new one (if generated)
+                        // This will store the updated list and re-render with current sort
+                        fetchEssays();
                         return;
                     }
 
@@ -184,7 +232,8 @@ document.addEventListener('DOMContentLoaded', () => {
                                     console.log("SSE Stream ended by server.");
                                     // Stream ended signal received
                                     reader.cancel(); // Close the reader
-                                    fetchEssays(currentSort.field, currentSort.order);
+                                    // Re-fetch all essays after successful generation
+                                    fetchEssays();
                                 }
                             } catch (e) {
                                 console.error("Error parsing SSE data:", e, "Line:", line);
@@ -204,7 +253,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Handle non-streaming response (shouldn't happen with current backend logic)
                 const text = await response.text();
                 responseOutput.textContent = text;
-                fetchEssays(currentSort.field, currentSort.order); // Update list
+                fetchEssays(); // Update list
             }
 
         } catch (error) {
@@ -222,22 +271,35 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-
     // --- Handle Sorting ---
     sortButtons.forEach(button => {
         button.addEventListener('click', () => {
             const sortBy = button.dataset.sort;
-            const order = button.dataset.order;
+            let order = button.dataset.order;
+
+            // Update active button style first
+            sortButtons.forEach(btn => btn.classList.remove('active'));
+            button.classList.add('active');
+
+            // --- Toggle Sort Order Logic ---
+            // If clicking the same button, toggle the order
+            if (currentSort.field === sortBy) {
+                order = currentSort.order === 'asc' ? 'desc' : 'asc';
+                // Update the button's data-order attribute for visual consistency (optional)
+                button.dataset.order = order;
+                console.log(`Toggled order to: ${order}`);
+            } else {
+                // If switching field, reset order based on button's default data-order
+                order = button.dataset.order;
+                console.log(`Switched sort field to: ${sortBy}, initial order: ${order}`);
+            }
+            // --------------------------- //
 
             // Update current sort state
             currentSort = { field: sortBy, order: order };
 
-            // Update active button style
-            sortButtons.forEach(btn => btn.classList.remove('active'));
-            button.classList.add('active');
-
             // Fetch essays with new sorting
-            fetchEssays(sortBy, order);
+            renderEssays(allEssays);
         });
     });
 
