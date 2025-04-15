@@ -14,8 +14,6 @@ export interface Env {
     LLM_SYSTEM_PROMPT: string;
     LLM_MAX_TOKENS: string;
     LLM_PROMPT_TEMPLATE: string;
-    RESTRICT_TO_CURRENT_MODEL: boolean;
-    RESTRICT_TO_CURRENT_PROMPT: boolean;
 
     // Add bindings for KV, R2, etc. if needed later
 }
@@ -201,59 +199,17 @@ async function handleEssays(request: Request, env: Env, supabase: SupabaseClient
     }
 
     try {
-        // --- Check Model Restriction ---
-        const restrictByModel = env.RESTRICT_TO_CURRENT_MODEL?.toString().toLowerCase() === 'true';
-        let current_params_id: string | null = null;
-        if (restrictByModel) {
-            console.log("Restriction to current model enabled. Fetching current params_id...");
-            const model_name = env.LLM_MODEL_NAME || 'claude-3-haiku-20240307';
-            const system_prompt = env.LLM_SYSTEM_PROMPT || '';
-            const max_tokens = parseInt(env.LLM_MAX_TOKENS || '1000', 10);
-            const { data: paramsData, error: paramsError } = await supabase.from('model_params').select('params_id').match({ model_name, system_prompt, max_tokens }).maybeSingle();
-            if (paramsError) {
-                console.error("Error fetching current model_params for restriction:", paramsError);
-                // Proceed without restriction if params lookup fails?
-                // Or return error? Let's proceed without restriction for now.
-            } else if (paramsData) {
-                current_params_id = paramsData.params_id;
-                console.log(`Current model params_id found: ${current_params_id}`);
-            } else {
-                console.warn("Current model parameters not found in DB. Cannot restrict results.");
-            }
-        }
-
-        // --- Check Prompt Template Restriction ---
-        const restrictByPrompt = env.RESTRICT_TO_CURRENT_PROMPT?.toString().toLowerCase() === 'true';
-        let promptPrefixFilter: string | null = null;
-        if (restrictByPrompt) {
-            console.log("Restriction to current prompt template enabled.");
-            const current_template = env.LLM_PROMPT_TEMPLATE || 'Write an essay about {short_description}';
-            const placeholderIndex = current_template.indexOf('{short_description}');
-            if (placeholderIndex > 0) {
-                promptPrefixFilter = current_template.substring(0, placeholderIndex);
-                console.log(`Filtering prompts where prompt_text starts with: "${promptPrefixFilter}"`);
-            } else {
-                // If the template doesn't contain the placeholder as expected, we can't reliably filter.
-                console.warn(`Prompt template "${current_template}" does not contain "{short_description}" in the expected format. Cannot filter by prompt template.`);
-            }
-        }
-        // ------------------------------------------ //
-
         // --- Query Prompts and Aggregate View Counts ---
-        // 1. Fetch prompts (apply prompt filter if needed)
-        let promptsQuery = supabase
+        // Note: Using an RPC function in Supabase is recommended for efficiency.
+        // Replicating the multi-query approach from Python:
+
+        // 1. Fetch all prompts
+        const { data: promptsData, error: promptsError } = await supabase
             .from('prompts')
             .select('prompt_id, short_description, created_at');
 
-        if (restrictByPrompt && promptPrefixFilter) {
-            promptsQuery = promptsQuery.like('prompt_text', `${promptPrefixFilter}%`);
-        }
-
-        const { data: promptsData, error: promptsError } = await promptsQuery;
-
         if (promptsError) throw promptsError;
         if (!promptsData || promptsData.length === 0) {
-            console.log("No prompts found matching the criteria.");
             return new Response(JSON.stringify([]), { headers: { 'Content-Type': 'application/json' } });
         }
 
@@ -264,18 +220,11 @@ async function handleEssays(request: Request, env: Env, supabase: SupabaseClient
             promptIds.push(p.prompt_id);
         });
 
-        // 2. Fetch response IDs linked to these prompts (Apply model filter if needed)
-        let responseQuery = supabase
+        // 2. Fetch response IDs linked to these prompts
+        const { data: responsesIdsData, error: responsesError } = await supabase
             .from('responses')
             .select('prompt_id, response_id')
             .in('prompt_id', promptIds);
-
-        if (restrictByModel && current_params_id) {
-            console.log(`Applying model restriction: Only responses with params_id=${current_params_id}`);
-            responseQuery = responseQuery.eq('params_id', current_params_id);
-        }
-
-        const { data: responsesIdsData, error: responsesError } = await responseQuery;
 
         if (responsesError) throw responsesError;
 
@@ -291,7 +240,7 @@ async function handleEssays(request: Request, env: Env, supabase: SupabaseClient
             });
         }
 
-        // 3. Fetch view counts for these (potentially filtered) response IDs
+        // 3. Fetch view counts for these response IDs
         const viewsPerResponse: { [rid: string]: number } = {};
         if (responseIds.length > 0) {
             const { data: viewsData, error: viewsError } = await supabase
@@ -316,6 +265,7 @@ async function handleEssays(request: Request, env: Env, supabase: SupabaseClient
             }
         }
 
+
         // 4. Combine data
         const finalData = Object.values(promptsMap).map(promptInfo => {
             const pid = promptInfo.prompt_id;
@@ -325,17 +275,14 @@ async function handleEssays(request: Request, env: Env, supabase: SupabaseClient
                     totalViews += (viewsPerResponse[rid] || 0);
                 });
             }
-            if (!restrictByModel || promptIdToResponseIds[pid]) {
-                return {
-                    prompt: promptInfo.short_description,
-                    created_at: promptInfo.created_at,
-                    view_count: totalViews,
-                };
-            }
-            return null;
-        }).filter(item => item !== null);
+            return {
+                prompt: promptInfo.short_description,
+                created_at: promptInfo.created_at,
+                view_count: totalViews,
+            };
+        });
 
-        console.log(`Processed ${finalData.length} prompts after potential filtering.`);
+        console.log(`Processed ${finalData.length} prompts.`);
         // Return unsorted data (client-side handles sorting)
         return new Response(JSON.stringify(finalData), { headers: { 'Content-Type': 'application/json' } });
 

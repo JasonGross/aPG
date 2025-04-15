@@ -10,8 +10,7 @@ LLM_MODEL_NAME = "claude-3-7-sonnet-20250219"
 LLM_SYSTEM_PROMPT = ""
 LLM_MAX_TOKENS = "3500"
 LLM_PROMPT_TEMPLATE = "Write a Paul Graham essay about {short_description}"
-RESTRICT_TO_CURRENT_MODEL = true
-RESTRICT_TO_CURRENT_PROMPT = false
+
 
 # Secrets (set via `wrangler secret put`)
 # ANTHROPIC_API_KEY
