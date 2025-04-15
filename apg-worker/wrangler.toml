@@ -1,0 +1,18 @@
+    # wrangler.toml
+    name = "my-apg-worker"
+    main = "src/index.ts"
+    compatibility_date = "2024-04-05" # Use a recent date
+
+    # Add bindings for secrets and environment variables
+    # Use 'wrangler secret put <VAR_NAME>' to set secret values
+    [vars]
+    LLM_MODEL_NAME = "claude-3-5-sonnet-20240620"
+    LLM_SYSTEM_PROMPT = ""
+    LLM_MAX_TOKENS = "3500"
+    LLM_PROMPT_TEMPLATE = "Write a Paul Graham essay about {short_description}"
+
+
+    # Secrets (set via `wrangler secret put`)
+    # ANTHROPIC_API_KEY
+    # SUPABASE_URL
+    # SUPABASE_SERVICE_KEY
