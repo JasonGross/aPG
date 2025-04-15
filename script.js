@@ -246,7 +246,7 @@ document.addEventListener('DOMContentLoaded', () => {
             setTimeout(() => {
                 const cachedRawText = responseCache[prompt];
                 responseOutput.innerHTML = renderFormattedText(cachedRawText);
-                finalizeUI(true); // Finalize UI after rendering cached content
+                finalizeUI(false);
                 console.log("Finished displaying cached response.");
             }, 50); // Short delay
 
