@@ -183,8 +183,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Show loading state in the list while fetching
         essaysList.innerHTML = '<li class="text-gray-400">Loading essays...</li>';
         try {
-            // Fetch from the simplified endpoint (no sort params)
-            const response = await fetch(`/essays`);
+            // Fetch from the deployed worker URL
+            const response = await fetch(`https://apg-worker.jasongross9.workers.dev/essays`);
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
@@ -264,8 +264,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            // Fetch logic (POST request)
-            const response = await fetch('/ask', {
+            // Fetch logic (POST request to deployed worker URL)
+            const response = await fetch('https://apg-worker.jasongross9.workers.dev/ask', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded', // FastAPI Form expects this
