@@ -15,6 +15,47 @@ document.addEventListener('DOMContentLoaded', () => {
     let eventSource = null; // To hold the EventSource connection
     let isFirstChunk = false; // Flag to track the first text chunk
     let allEssays = []; // Store all fetched essays locally
+    let responseCache = {}; // Cache for RAW full essay responses { prompt: rawFullText }
+
+    // --- Helper: Finalize UI State ---
+    function finalizeUI(success = true) {
+        promptInput.disabled = false;
+        submitButton.disabled = false;
+        submitButton.textContent = 'Generate Essay';
+        loadingIndicator.classList.add('hidden');
+        if (success) {
+            fetchEssays(); // Refresh essay list on success
+        }
+        console.log("UI finalized.");
+    }
+
+    // --- Helper: Render Raw Text to Formatted HTML ---
+    function renderFormattedText(rawText) {
+        if (!rawText) return '';
+
+        // Escape HTML
+        const escapedText = rawText
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+
+        // Find first paragraph break for title
+        const firstParaBreakIndex = escapedText.search(/\n+/);
+        let htmlOutput = "";
+
+        if (firstParaBreakIndex !== -1) {
+            const title = escapedText.substring(0, firstParaBreakIndex);
+            const restOfText = escapedText.substring(firstParaBreakIndex);
+            // Format: Title span + replaced newlines in the rest
+            htmlOutput = `<span class="essay-title">${title}</span>${restOfText.replace(/\n+/g, '<br><br>')}`;
+        } else {
+            // If no newline sequence, treat the whole text as the title
+            htmlOutput = `<span class="essay-title">${escapedText}</span>`;
+        }
+        return htmlOutput;
+    }
 
     // --- Character Counter ---
     promptInput.addEventListener('input', () => {
@@ -167,41 +208,63 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Handle Form Submission ---
     promptForm.addEventListener('submit', async (event) => {
-        event.preventDefault(); // Prevent default form submission
+        event.preventDefault();
         const prompt = promptInput.value.trim();
+        let rawFullResponseAccumulator = ""; // Accumulates RAW text for caching
 
-        if (!prompt) return; // Do nothing if prompt is empty
+        if (!prompt) return;
 
-        // --- Update URL with the submitted prompt ---
+        // Update URL
         try {
             const url = new URL(window.location);
             url.searchParams.set('prompt', prompt);
             history.pushState({ prompt: prompt }, '', url.toString());
-            console.log("URL updated on submit to:", url.toString());
         } catch (e) {
             console.error("Error updating URL on submit:", e);
         }
-        // ------------------------------------------ //
 
-        // Close any existing EventSource connection
-        if (eventSource) {
-            eventSource.close();
+        // --- Check Cache ---
+        if (responseCache[prompt]) {
+            console.log("Loading response from cache for:", prompt);
+            // Basic UI update for loading
+            submitButton.textContent = 'Loading Cached...';
+            loadingIndicator.classList.remove('hidden');
+            responseOutput.innerHTML = ''; // Clear previous output
+            errorMessage.classList.add('hidden');
+            promptInput.disabled = true;
+            submitButton.disabled = true;
+
+            // Use a timeout to allow UI to update before rendering
+            setTimeout(() => {
+                const cachedRawText = responseCache[prompt];
+                responseOutput.innerHTML = renderFormattedText(cachedRawText);
+                finalizeUI(true); // Finalize UI after rendering cached content
+                console.log("Finished displaying cached response.");
+            }, 50); // Short delay
+
+            return; // Stop execution, don't fetch from backend
         }
+        // --------------- //
 
-        // UI updates: disable input/button, show loading, clear previous results
+        console.log("Fetching response from backend for:", prompt);
+        // Reset first chunk flag for live stream formatting
+        isFirstChunk = true;
+        // Basic UI update for loading
         promptInput.disabled = true;
         submitButton.disabled = true;
         submitButton.textContent = 'Generating...';
         loadingIndicator.classList.remove('hidden');
-        responseOutput.innerHTML = ''; // Clear previous output
-        errorMessage.classList.add('hidden'); // Hide previous errors
-        isFirstChunk = true; // Reset flag for new request
+        responseOutput.innerHTML = '';
+        errorMessage.classList.add('hidden');
+
+        // Close any existing EventSource connection (moved down)
+        if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+        }
 
         try {
-            // Use EventSource for Server-Sent Events
-            eventSource = new EventSource(`/ask?prompt=${encodeURIComponent(prompt)}`, { method: 'POST' }); // NOTE: EventSource uses GET by default, FastAPI route needs POST. This is tricky.
-            // Standard fetch is better suited for POST + Streaming body response. Let's refactor to use fetch.
-
+            // Fetch logic (POST request)
             const response = await fetch('/ask', {
                 method: 'POST',
                 headers: {
@@ -219,109 +282,105 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
             }
 
-            // Check if response is event-stream (SSE)
             if (response.headers.get('content-type')?.includes('text/event-stream')) {
-                // Handle SSE stream with fetch
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
 
                 reader.read().then(function processText({ done, value }) {
                     if (done) {
-                        console.log("Stream complete");
-                        // Re-fetch all essays to include the new one (if generated)
-                        // This will store the updated list and re-render with current sort
-                        fetchEssays();
+                        console.log("Stream complete.");
+                        // Cache the RAW response on successful completion
+                        if (!errorMessage.textContent) { // Check if an error message was displayed during stream
+                            responseCache[prompt] = rawFullResponseAccumulator;
+                            console.log("Response cached for:", prompt);
+                            finalizeUI(true); // Finalize UI (will fetch essays)
+                        } else {
+                            finalizeUI(false); // Finalize UI but don't refresh list if errors occurred
+                        }
                         return;
                     }
 
                     const chunk = decoder.decode(value, { stream: true });
-                    // Process potential multiple events in a single chunk
                     const lines = chunk.split('\n');
                     lines.forEach(line => {
                         if (line.startsWith('data:')) {
                             try {
                                 const data = JSON.parse(line.substring(5).trim());
                                 if (data.text) {
-                                    // Escape HTML to prevent injection
-                                    const escapedText = data.text
+                                    // Accumulate RAW text for cache
+                                    rawFullResponseAccumulator += data.text;
+
+                                    // --- Format and append chunk for live display ---
+                                    const escapedChunk = data.text
                                         .replace(/&/g, '&amp;')
                                         .replace(/</g, '&lt;')
                                         .replace(/>/g, '&gt;')
                                         .replace(/"/g, '&quot;')
                                         .replace(/'/g, '&#039;');
-
-                                    let formattedOutput = "";
+                                    let formattedChunkHTML = "";
                                     if (isFirstChunk) {
-                                        // Find the index of the first occurrence of one or more newlines
-                                        const firstParaBreakIndex = escapedText.search(/\n+/);
-
-                                        if (firstParaBreakIndex !== -1) {
-                                            // Extract title (before the first paragraph break)
-                                            const title = escapedText.substring(0, firstParaBreakIndex);
-                                            // Extract the rest of the text (including the newlines that caused the break)
-                                            const restOfText = escapedText.substring(firstParaBreakIndex);
-
-                                            // Format: Title span + replaced newlines in the rest
-                                            formattedOutput = `<span class="essay-title">${title}</span>${restOfText.replace(/\n+/g, '<br><br>')}`;
-                                            isFirstChunk = false; // Only process the first chunk this way
+                                        const firstBreak = escapedChunk.search(/\n+/);
+                                        if (firstBreak !== -1) {
+                                            const titlePart = escapedChunk.substring(0, firstBreak);
+                                            const restPart = escapedChunk.substring(firstBreak);
+                                            formattedChunkHTML = `<span class="essay-title">${titlePart}</span>${restPart.replace(/\n+/g, '<br><br>')}`;
                                         } else {
-                                            // If the first chunk has no newline sequence, treat the whole chunk as the title
-                                            const title = escapedText; // No need to replace newlines here if none exist
-                                            formattedOutput = `<span class="essay-title">${title}</span>`;
-                                            // Subsequent chunks will add <br> if needed
+                                            formattedChunkHTML = `<span class="essay-title">${escapedChunk}</span>`; // Whole first chunk is title
                                         }
+                                        isFirstChunk = false; // Title handled for live stream
                                     } else {
-                                        // For subsequent chunks, just escape and replace newlines
-                                        formattedOutput = escapedText.replace(/\n+/g, '<br><br>');
+                                        formattedChunkHTML = escapedChunk.replace(/\n+/g, '<br><br>');
                                     }
-                                    responseOutput.innerHTML += formattedOutput; // Append safely formatted text chunk
-
+                                    responseOutput.innerHTML += formattedChunkHTML;
+                                    // --------------------------------------------- //
                                 } else if (data.error) {
                                     console.error("SSE Error:", data.error);
                                     errorMessage.textContent = `Error: ${data.error}`;
                                     errorMessage.classList.remove('hidden');
-                                    // Optionally close the stream reader on error
-                                    reader.cancel();
+                                    finalizeUI(false); // Finalize UI on stream error
+                                    reader.cancel(); // Stop reading on error
                                 } else if (data.end) {
                                     console.log("SSE Stream ended by server.");
-                                    // Stream ended signal received
-                                    reader.cancel(); // Close the reader
-                                    // Re-fetch all essays after successful generation
-                                    fetchEssays();
+                                    // Cache the RAW response on server end signal (if no prior error)
+                                    if (!errorMessage.textContent) {
+                                        responseCache[prompt] = rawFullResponseAccumulator;
+                                        console.log("Response cached for:", prompt);
+                                        finalizeUI(true); // Finalize UI
+                                    } else {
+                                        finalizeUI(false);
+                                    }
+                                    reader.cancel();
                                 }
                             } catch (e) {
                                 console.error("Error parsing SSE data:", e, "Line:", line);
+                                errorMessage.textContent = "Error processing response stream.";
+                                errorMessage.classList.remove('hidden');
+                                finalizeUI(false); // Finalize on parsing error
+                                reader.cancel();
                             }
                         }
                     });
-
                     // Continue reading
                     reader.read().then(processText);
                 }).catch(error => {
                     console.error("Stream reading error:", error);
-                    errorMessage.textContent = `Stream reading error: ${error.message}`;
+                    errorMessage.textContent = `Stream error: ${error.message}`;
                     errorMessage.classList.remove('hidden');
+                    finalizeUI(false); // Finalize on stream read error
                 });
-
             } else {
-                // Handle non-streaming response (shouldn't happen with current backend logic)
-                const text = await response.text();
-                responseOutput.textContent = text;
-                fetchEssays(); // Update list
+                // Handle non-streaming response
+                const rawText = await response.text();
+                responseCache[prompt] = rawText; // Cache raw text
+                console.log("Non-streamed response cached for:", prompt);
+                responseOutput.innerHTML = renderFormattedText(rawText); // Render formatted
+                finalizeUI(true); // Finalize UI
             }
-
         } catch (error) {
             console.error('Error submitting prompt:', error);
             errorMessage.textContent = `Error: ${error.message}`;
             errorMessage.classList.remove('hidden');
-        } finally {
-            // Re-enable form elements regardless of success/failure AFTER stream ends
-            // Need to move this logic to inside the stream handling completion/error
-            promptInput.disabled = false;
-            submitButton.disabled = false;
-            submitButton.textContent = 'Generate Essay';
-            loadingIndicator.classList.add('hidden');
-            // Note: Re-enabling is handled more accurately within the stream processing logic (on done/error/end)
+            finalizeUI(false); // Finalize UI on fetch/network error
         }
     });
 
