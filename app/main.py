@@ -11,6 +11,7 @@ from postgrest.types import CountMethod
 from dotenv import load_dotenv
 import json
 from pydantic import BaseModel
+from datetime import datetime  # Add datetime import
 
 # --- Import Anthropic ---
 from anthropic import AsyncAnthropic, APIError
@@ -386,7 +387,7 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
     # (Define these based on your logic - fixed for now)
     model_name = "claude-3-5-sonnet-20240620"
     system_prompt = "You are an AI assistant that writes essays in the style of Paul Graham. Focus on insights about startups, technology, programming, and contrarian thinking. Be concise and clear."
-    max_tokens = 3500 # GPT 2 token statistics on PG essays as of 2025-04-14
+    max_tokens = 3500  # GPT 2 token statistics on PG essays as of 2025-04-14
     # Mean: 3284.29, Median: 2052, Mode: 3292
     # Min: 104, Max: 17718, SD: 3086.28
     prompt_text = f"Write a Paul Graham essay about {short_description}"
@@ -425,7 +426,10 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
             new_prompt_result = (
                 supabase.table("prompts")
                 .insert(
-                    {"short_description": short_description, "prompt_text": prompt_text},
+                    {
+                        "short_description": short_description,
+                        "prompt_text": prompt_text,
+                    },
                     returning="representation",  # type: ignore
                 )
                 .execute()
@@ -435,9 +439,7 @@ async def ask_paul_graham(request: Request, prompt: str = Form(...)):
                 logger.error(
                     f"Failed to insert prompt for description: {short_description}"
                 )
-                raise HTTPException(
-                    status_code=500, detail="Failed to create prompt."
-                )
+                raise HTTPException(status_code=500, detail="Failed to create prompt.")
 
             prompt_info = new_prompt_result.data[0]
             prompt_id = prompt_info["prompt_id"]
@@ -633,31 +635,80 @@ async def get_essays(sort_by: str = "time", order: str = "desc"):
             for resp in responses_linking_resp.data:
                 prompt_id = resp["prompt_id"]
                 response_id = resp["response_id"]
-                views_per_prompt[prompt_id] += views_per_response.get(response_id, 0)
+                # Ensure prompt_id exists before incrementing
+                if prompt_id in views_per_prompt:
+                    views_per_prompt[prompt_id] += views_per_response.get(
+                        response_id, 0
+                    )
+                else:
+                    # This case might indicate an inconsistency if a response links
+                    # to a prompt_id not fetched initially. Log a warning.
+                    logger.warning(
+                        f"Response {response_id} links to prompt {prompt_id} which was not in the initial prompt fetch."
+                    )
 
         # Combine data
         final_data = []
         for pid, prompt_info in prompts_map.items():
-            created_at_iso = (
-                prompt_info["created_at"].isoformat()
-                if prompt_info.get("created_at")
-                else None
-            )
+            created_at_str = prompt_info.get("created_at")
+            dt_obj = None
+            created_at_iso = None
+            if created_at_str:
+                try:
+                    # Handle potential 'Z' timezone indicator which Python < 3.11 doesn't parse directly
+                    if created_at_str.endswith("Z"):
+                        created_at_str_parsed = created_at_str[:-1] + "+00:00"
+                    else:
+                        created_at_str_parsed = created_at_str
+                    dt_obj = datetime.fromisoformat(created_at_str_parsed)
+                    created_at_iso = (
+                        dt_obj.isoformat()
+                    )  # Format back for JSON if needed, keeps original offset
+                except ValueError:
+                    logger.warning(
+                        f"Could not parse created_at string: {created_at_str}. Leaving as is."
+                    )
+                    created_at_iso = (
+                        created_at_str  # Keep original string if parse fails
+                    )
+
             final_data.append(
                 {
                     "prompt": prompt_info.get("short_description"),
-                    "created_at": created_at_iso,
+                    "created_at": created_at_iso,  # Use the potentially re-formatted ISO string for consistency in JSON
+                    "_created_at_dt": dt_obj,  # Internal field for sorting
                     "view_count": views_per_prompt.get(pid, 0),
                 }
             )
         logger.info(f"Processed {len(final_data)} prompts with aggregated views.")
         # -------------------------------------------------- #
 
-        # Sort results in Python
-        final_data.sort(
-            key=lambda x: x.get(sort_key) or (0 if sort_key == "view_count" else " "),
-            reverse=reverse_sort,
-        )
+        # --- Sort results in Python --- #
+        # Define sort key functions
+        def get_sort_key(item):
+            if sort_key == "created_at":
+                # Handle None values appropriately for sorting
+                dt_val = item.get("_created_at_dt")
+                if dt_val is None:
+                    # Place None values at the beginning if ascending, end if descending
+                    return datetime.min if not reverse_sort else datetime.max
+                return dt_val
+            elif sort_key == "prompt":
+                return item.get("prompt") or ""
+            elif sort_key == "view_count":
+                return item.get("view_count") or 0
+            else:  # Default to created_at if sort_key is invalid
+                dt_val = item.get("_created_at_dt")
+                if dt_val is None:
+                    return datetime.min if not reverse_sort else datetime.max
+                return dt_val
+
+        final_data.sort(key=get_sort_key, reverse=reverse_sort)
+
+        # Remove the internal sorting key before returning
+        for item in final_data:
+            del item["_created_at_dt"]
+        # ------------------------------ #
 
         return JSONResponse(content=final_data)
 
