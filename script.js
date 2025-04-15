@@ -13,9 +13,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentSort = { field: 'time', order: 'desc' }; // Default sort
     let eventSource = null; // To hold the EventSource connection
-    let isFirstChunk = false; // Flag to track the first text chunk
-    let allEssays = []; // Store all fetched essays locally
-    let responseCache = {}; // Cache for RAW full essay responses { prompt: rawFullText }
+    let allEssays = [];
+    let responseCache = {};
+    let titleRendered = false; // Flag to track if the title part has been rendered
 
     // --- Helper: Finalize UI State ---
     function finalizeUI(success = true) {
@@ -218,7 +218,7 @@ document.addEventListener('DOMContentLoaded', () => {
     promptForm.addEventListener('submit', async (event) => {
         event.preventDefault();
         const prompt = promptInput.value.trim();
-        let rawFullResponseAccumulator = ""; // Accumulates RAW text for caching
+        let rawFullResponseAccumulator = "";
 
         if (!prompt) return;
 
@@ -255,8 +255,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // --------------- //
 
         console.log("Fetching response from backend for:", prompt);
-        // Reset first chunk flag for live stream formatting
-        isFirstChunk = true;
+        // Reset title rendered flag for new request
+        titleRendered = false;
         // Basic UI update for loading
         promptInput.disabled = true;
         submitButton.disabled = true;
@@ -318,31 +318,42 @@ document.addEventListener('DOMContentLoaded', () => {
                                     // Accumulate RAW text for cache
                                     rawFullResponseAccumulator += data.text;
 
-                                    // --- Format and append chunk for live display ---
+                                    // Escape the current chunk
                                     const escapedChunk = data.text
                                         .replace(/&/g, '&amp;')
                                         .replace(/</g, '&lt;')
                                         .replace(/>/g, '&gt;')
                                         .replace(/"/g, '&quot;')
                                         .replace(/'/g, '&#039;');
+
                                     let formattedChunkHTML = "";
-                                    if (isFirstChunk) {
-                                        const firstBreak = escapedChunk.search(/\n+/);
-                                        if (firstBreak !== -1) {
-                                            const titlePart = escapedChunk.substring(0, firstBreak);
-                                            const restPart = escapedChunk.substring(firstBreak);
+
+                                    // --- New Title Handling Logic ---
+                                    if (!titleRendered) {
+                                        const firstBreakIndex = escapedChunk.search(/\n+/);
+
+                                        if (firstBreakIndex !== -1) {
+                                            // Newline found in this chunk - Title ends here
+                                            const titlePart = escapedChunk.substring(0, firstBreakIndex);
+                                            const restPart = escapedChunk.substring(firstBreakIndex);
+                                            // Format title part + rest part (with its newlines converted)
                                             formattedChunkHTML = `<span class="essay-title">${titlePart}</span>${restPart.replace(/\n+/g, '<br><br>')}`;
+                                            titleRendered = true; // Mark title as fully rendered
                                         } else {
-                                            formattedChunkHTML = `<span class="essay-title">${escapedChunk}</span>`; // Whole first chunk is title
+                                            // No newline yet - entire chunk is part of the title
+                                            formattedChunkHTML = `<span class="essay-title">${escapedChunk}</span>`;
+                                            // titleRendered remains false
                                         }
-                                        isFirstChunk = false; // Title handled for live stream
                                     } else {
+                                        // Title already rendered, process chunk normally
                                         formattedChunkHTML = escapedChunk.replace(/\n+/g, '<br><br>');
                                     }
+                                    // --------------------------------- //
+
                                     responseOutput.innerHTML += formattedChunkHTML;
-                                    // Replace multiple consecutive <br><br> with a single <br><br>
-                                    responseOutput.innerHTML = responseOutput.innerHTML.replace(/<br>(<br>)+/g, '<br><br>');
-                                    // --------------------------------------------- //
+                                    // Consolidate multiple <br> tags added by chunking/newlines
+                                    responseOutput.innerHTML = responseOutput.innerHTML.replace(/(<br\s*\/?><br\s*\/?>)+/g, '<br><br>');
+
                                 } else if (data.error) {
                                     console.error("SSE Error:", data.error);
                                     errorMessage.textContent = `Error: ${data.error}`;
