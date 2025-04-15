@@ -4,14 +4,14 @@ FROM python:3.9-slim
 # Set the working directory in the container
 WORKDIR /code
 
-# Copy the requirements file into the container at /code
-COPY ./requirements.txt /code/requirements.txt
+# Copy the pyproject.toml file into the container at /code
+COPY ./pyproject.toml /code/pyproject.toml
 
-# Install any needed packages specified in requirements.txt
+# Install the project and its dependencies using pyproject.toml
 # --no-cache-dir: Disables the cache to keep image size down
 # --upgrade pip: Ensures pip is up-to-date
-# -r requirements.txt: Installs packages from the requirements file
-RUN pip install --no-cache-dir --upgrade pip -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir .
 
 # Copy the rest of the application code (the 'app' directory contents)
 # into the container at /code/app
