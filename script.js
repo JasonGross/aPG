@@ -180,8 +180,16 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Fetch Essays (Only Fetches, Does Not Sort/Render) ---
     async function fetchEssays() {
         console.log(`Fetching all essays from backend...`);
-        // Show loading state in the list while fetching
-        essaysList.innerHTML = '<li class="text-gray-400">Loading essays...</li>';
+
+        // Show loading state ONLY if the list is currently empty of actual essay items
+        if (!essaysList.querySelector('li')) { // Check if any <li> elements exist
+            console.log("Essay list is empty, showing loading message.");
+            essaysList.innerHTML = '<li class="text-gray-400">Loading essays...</li>';
+        } else {
+            console.log("Essay list has items, keeping them visible during fetch.");
+            // Keep existing list displayed during refresh
+        }
+
         try {
             // Fetch from the deployed worker URL
             const response = await fetch(`https://apg-worker.jasongross9.workers.dev/essays`);
