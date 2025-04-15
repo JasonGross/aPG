@@ -339,22 +339,23 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
     const encoder = createSSEEncoder();
     const encodedStream = readable.pipeThrough(encoder);
 
-    // Start processing async, but return the readable stream immediately
+    // Start processing async
     (async () => {
         const writer = writable.getWriter();
+        let streamErrorOccurred = false; // Flag to track if errors were sent
         try {
-            // --- Get or Create Model Params (Replaced Upsert) ---
+            // --- DB Operations: Get/Create Params & Prompt (Keep existing select/insert logic) ---
             let params_id: string;
             console.log("Checking for existing model_params...");
             const { data: existingParams, error: paramsSelectError } = await supabase
                 .from('model_params')
                 .select('params_id')
                 .match({ model_name, system_prompt, max_tokens })
-                .maybeSingle(); // Use maybeSingle to handle null result gracefully
+                .maybeSingle();
 
             if (paramsSelectError) {
                 console.error("Error selecting model_params:", paramsSelectError);
-                throw new Error(`Database error checking model parameters: ${paramsSelectError.message}`);
+                throw new Error(`DB error checking model params: ${paramsSelectError.message}`);
             }
 
             if (existingParams) {
@@ -366,20 +367,18 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                     .from('model_params')
                     .insert({ model_name, system_prompt, max_tokens })
                     .select('params_id')
-                    .single(); // Expect single row after insert
+                    .single();
 
                 if (paramsInsertError || !newParamsData) {
                     console.error("Error inserting new model_params:", paramsInsertError);
-                    throw new Error(`Database error creating model parameters: ${paramsInsertError?.message || 'Insert failed'}`);
+                    throw new Error(`DB error creating model parameters: ${paramsInsertError?.message || 'Insert failed'}`);
                 }
                 params_id = newParamsData.params_id;
                 console.log("Created new model_params_id:", params_id);
             }
-            // ---------------------------------------------------- //
+            console.log("Got params_id:", params_id);
 
-            // --- Find or Create Prompt (Replaced Upsert) ---
             let prompt_id: string;
-            // let prompt_created_at: string; // Can get this if needed
             console.log("Checking for existing prompt...");
             const { data: existingPrompt, error: promptSelectError } = await supabase
                 .from('prompts')
@@ -389,12 +388,11 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
 
             if (promptSelectError) {
                 console.error("Error selecting prompt:", promptSelectError);
-                throw new Error(`Database error checking prompt: ${promptSelectError.message}`);
+                throw new Error(`DB error checking prompt: ${promptSelectError.message}`);
             }
 
             if (existingPrompt) {
                 prompt_id = existingPrompt.prompt_id;
-                // prompt_created_at = existingPrompt.created_at;
                 console.log("Found existing prompt_id:", prompt_id);
             } else {
                 console.log("No existing prompt found, creating new one...");
@@ -406,13 +404,13 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
 
                 if (promptInsertError || !newPromptData) {
                     console.error("Error inserting new prompt:", promptInsertError);
-                    throw new Error(`Database error creating prompt: ${promptInsertError?.message || 'Insert failed'}`);
+                    throw new Error(`DB error creating prompt: ${promptInsertError?.message || 'Insert failed'}`);
                 }
                 prompt_id = newPromptData.prompt_id;
-                // prompt_created_at = newPromptData.created_at;
                 console.log("Created new prompt_id:", prompt_id);
             }
-            // ---------------------------------------------------- //
+            console.log("Got prompt_id:", prompt_id);
+            // -------------------------------------------------------------------------------------- //
 
             // --- Check for Existing Response (Latest) ---
             const { data: latestResponseData, error: responseError } = await supabase
@@ -421,23 +419,22 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                 .eq('prompt_id', prompt_id)
                 .order('response_created_at', { ascending: false })
                 .limit(1)
-                .maybeSingle(); // Can be null if no response exists
+                .maybeSingle();
 
-            if (responseError) throw responseError;
+            if (responseError) throw responseError; // Propagate DB error
 
             if (latestResponseData) {
-                console.log("Found existing response:", latestResponseData.response_id);
                 // --- Stream Cached Response ---
+                console.log("Found existing response:", latestResponseData.response_id);
                 const response_id = latestResponseData.response_id;
                 const cachedText = latestResponseData.response_text;
-
-                // Record View
-                const { error: viewError } = await supabase.from('view_counts').insert({ response_id });
-                if (viewError) console.error("Failed to record view for cached response:", viewError);
-
-                // Stream the cached text (can be chunked if large)
-                await writer.write(cachedText); // Assuming createSSEEncoder handles string -> {text: ...}
-                await writer.write({ end: true }); // Use object for end signal
+                // Record View (Best effort)
+                supabase.from('view_counts').insert({ response_id }).then(({ error: viewError }) => {
+                    if (viewError) console.error("Failed to record view for cached response:", viewError);
+                });
+                // Stream the cached text
+                await writer.write(cachedText);
+                await writer.write({ end: true }); // Signal end immediately for cache
                 console.log("Finished streaming cached response.");
 
             } else {
@@ -445,6 +442,7 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                 console.log("No existing response found. Calling Anthropic...");
                 const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt_text }];
                 let fullResponseText = "";
+                let llmStreamSuccessful = false;
 
                 try {
                     const stream = anthropic.messages.stream({
@@ -460,48 +458,68 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                             fullResponseText += textChunk;
                             await writer.write(textChunk); // Stream chunk
                         }
-                        // Handle other event types if needed (e.g., message_stop)
                         if (event.type === 'message_stop') {
                             console.log("Anthropic stream stopped.");
+                            llmStreamSuccessful = true; // Mark LLM stream as successful
                         }
                     }
-
-                    // --- Save the New Response ---
-                    console.log("Anthropic stream finished. Saving response...");
-                    const { data: insertResponseData, error: insertError } = await supabase
-                        .from('responses')
-                        .insert({ prompt_id, params_id, response_text: fullResponseText })
-                        .select('response_id')
-                        .single();
-
-                    if (insertError || !insertResponseData) throw insertError || new Error("Failed to insert new response.");
-                    const new_response_id = insertResponseData.response_id;
-                    console.log("Saved new response:", new_response_id);
-
-                    // Record Initial View
-                    const { error: viewError } = await supabase.from('view_counts').insert({ response_id: new_response_id });
-                    if (viewError) console.error("Failed to record initial view:", viewError);
-
-                    await writer.write({ end: true }); // Signal end after saving
-                    console.log("Finished streaming and saving new response.");
-
                 } catch (llmError: any) {
-                    console.error("Error during Anthropic call or response saving:", llmError);
-                    await writer.write({ error: `LLM or save error: ${llmError.message}` });
-                    // Do not close writer here, let finally block handle it
+                    console.error("Error during Anthropic stream:", llmError);
+                    streamErrorOccurred = true;
+                    await writer.write({ error: `LLM stream error: ${llmError.message}` });
+                    // Do not proceed to save if LLM failed
+                    llmStreamSuccessful = false;
                 }
-            }
 
-        } catch (error: any) {
-            console.error("Error in /ask handler:", error);
-            // Ensure error message is sent even if stream partially wrote data
+                // --- Save the New Response ONLY if LLM stream was successful ---
+                if (llmStreamSuccessful) {
+                    try {
+                        console.log("Anthropic stream finished successfully. Saving response...");
+                        const { data: insertResponseData, error: insertError } = await supabase
+                            .from('responses')
+                            .insert({ prompt_id, params_id, response_text: fullResponseText })
+                            .select('response_id')
+                            .single();
+
+                        if (insertError || !insertResponseData) {
+                            throw insertError || new Error("Failed to insert new response or get ID.");
+                        }
+                        const new_response_id = insertResponseData.response_id;
+                        console.log("Saved new response:", new_response_id);
+
+                        // Record Initial View (Best effort)
+                        supabase.from('view_counts').insert({ response_id: new_response_id }).then(({ error: viewError }) => {
+                            if (viewError) console.error("Failed to record initial view:", viewError);
+                        });
+
+                        // Signal end ONLY after successful save
+                        await writer.write({ end: true });
+                        console.log("Finished streaming and saving new response.");
+
+                    } catch (saveError: any) {
+                        console.error("Error saving response to Supabase:", saveError);
+                        streamErrorOccurred = true;
+                        await writer.write({ error: `Failed to save response: ${saveError.message}` });
+                        // Do not write {end: true} if save failed
+                    }
+                } else {
+                    // If LLM stream failed, we already sent the error, do nothing more here
+                    console.log("Skipping save because LLM stream failed.");
+                }
+            } // end else (generate new response)
+
+        } catch (handlerError: any) { // Catch errors from initial DB checks or response finding
+            console.error("Error in /ask handler setup or response finding:", handlerError);
+            streamErrorOccurred = true;
             try {
-                await writer.write({ error: `Server error: ${error.message}` });
+                // Try to write error even if outer try failed early
+                await writer.write({ error: `Server setup error: ${handlerError.message}` });
             } catch (writeError) {
-                console.error("Failed to write error to stream:", writeError);
+                console.error("Failed to write setup error to stream:", writeError);
             }
         } finally {
-            // Ensure the writer is closed in all cases (success, error)
+            console.log(`Closing SSE writer. Stream error occurred: ${streamErrorOccurred}`);
+            // Close the writer
             try {
                 await writer.close();
             } catch (closeError) {
@@ -510,7 +528,7 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
         }
     })(); // IIFE to start async processing
 
-    // Return the readable side of the stream immediately
+    // --- Return Response Stream ---
     return new Response(encodedStream, {
         headers: {
             'Content-Type': 'text/event-stream',
