@@ -8,9 +8,9 @@ compatibility_date = "2024-04-05" # Use a recent date
 [vars]
 LLM_MODEL_NAME = "claude-3-7-sonnet-20250219"
 LLM_SYSTEM_PROMPT = ""
-LLM_MAX_TOKENS = "3500"
+LLM_MAX_TOKENS = 4500
 LLM_PROMPT_TEMPLATE = "Write a Paul Graham essay about {short_description}"
-
+LLM_THINKING_TOKENS = 1000
 
 # Secrets (set via `wrangler secret put`)
 # ANTHROPIC_API_KEY

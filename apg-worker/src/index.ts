@@ -12,8 +12,9 @@ export interface Env {
     // Non-secret vars
     LLM_MODEL_NAME: string;
     LLM_SYSTEM_PROMPT: string;
-    LLM_MAX_TOKENS: string;
+    LLM_MAX_TOKENS: number;
     LLM_PROMPT_TEMPLATE: string;
+    LLM_THINKING_TOKENS: number;
 
     // Add bindings for KV, R2, etc. if needed later
 }
@@ -322,8 +323,9 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
     // --- Get LLM Config from Env ---
     const model_name = env.LLM_MODEL_NAME || 'claude-3-haiku-20240307'; // Default
     const system_prompt = env.LLM_SYSTEM_PROMPT || '';
-    const max_tokens = parseInt(env.LLM_MAX_TOKENS || '1000', 10);
+    const max_tokens = env.LLM_MAX_TOKENS ?? 1000;
     const prompt_template = env.LLM_PROMPT_TEMPLATE || 'Write an essay about {short_description}';
+    const thinking_tokens = env.LLM_THINKING_TOKENS ?? 0;
     let prompt_text = '';
     try {
         prompt_text = prompt_template.replace('{short_description}', short_description);
@@ -350,7 +352,7 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
             const { data: existingParams, error: paramsSelectError } = await supabase
                 .from('model_params')
                 .select('params_id')
-                .match({ model_name, system_prompt, max_tokens })
+                .match({ model_name, system_prompt, max_tokens, thinking_tokens })
                 .maybeSingle();
 
             if (paramsSelectError) {
@@ -365,7 +367,7 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                 console.log("No existing model_params found, creating new one...");
                 const { data: newParamsData, error: paramsInsertError } = await supabase
                     .from('model_params')
-                    .insert({ model_name, system_prompt, max_tokens })
+                    .insert({ model_name, system_prompt, max_tokens, thinking_tokens })
                     .select('params_id')
                     .single();
 
@@ -432,25 +434,33 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                 const cachedParamsId = latestResponseData.params_id; // This will be same as params_id
 
                 // --- Fetch metadata for cached response ---
-                let metadata = { model_name, system_prompt, max_tokens, prompt_text }; // Start with current request's params (which match)
+                let metadata = { model_name, system_prompt, max_tokens, prompt_text, thinking_tokens };
                 try {
                     // Since params_id matches, we already have the correct model_name, system_prompt, max_tokens.
-                    // We still need to fetch the specific prompt_text associated with the prompt_id as it might differ from short_description if template changed.
+                    // Fetch the specific prompt_text and thinking_tokens associated with the params_id
+                    const { data: cachedParamsData, error: cachedParamsError } = await supabase
+                        .from('model_params')
+                        .select('model_name, system_prompt, max_tokens, thinking_tokens') // Select all params
+                        .eq('params_id', cachedParamsId)
+                        .single();
+                    if (cachedParamsError) throw cachedParamsError;
+
                     const { data: cachedPromptData, error: cachedPromptError } = await supabase
                         .from('prompts')
                         .select('prompt_text')
                         .eq('prompt_id', prompt_id)
                         .single(); // Expecting one prompt
                     if (cachedPromptError) throw cachedPromptError;
-                    if (cachedPromptData) {
-                        metadata.prompt_text = cachedPromptData.prompt_text; // Update prompt_text specifically
+
+                    if (cachedParamsData && cachedPromptData) {
+                        metadata = { ...cachedParamsData, prompt_text: cachedPromptData.prompt_text }; // Combine fetched data
                     }
 
                     console.log("Metadata for cached response:", metadata);
                     await writer.write({ metadata }); // Send metadata event first
                 } catch (metaError: any) {
-                    console.error("Error fetching prompt_text for cached response metadata:", metaError);
-                    // Log and continue streaming text even if prompt_text fetch fails.
+                    console.error("Error fetching metadata for cached response:", metaError);
+                    // Log and continue streaming text even if metadata fetch fails.
                 }
                 // -----------------------------------------
 
@@ -497,12 +507,22 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                 let llmStreamSuccessful = false;
 
                 try {
-                    const stream = anthropic.messages.stream({
+                    const streamOptions: Anthropic.Messages.MessageStreamParams = {
                         model: model_name,
                         max_tokens: max_tokens,
                         system: system_prompt,
                         messages: messages,
-                    });
+                    };
+
+                    // Only include thinking configuration when thinking_tokens is valid
+                    if (thinking_tokens && thinking_tokens > 0) {
+                        streamOptions.thinking = {
+                            type: "enabled",
+                            budget_tokens: thinking_tokens
+                        };
+                    }
+
+                    const stream = anthropic.messages.stream(streamOptions);
 
                     for await (const event of stream) {
                         if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
@@ -527,8 +547,8 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                     try {
                         console.log("Anthropic stream finished successfully. Saving response...");
 
-                        // --- Construct metadata ---
-                        const metadata = { model_name, system_prompt, max_tokens, prompt_text };
+                        // --- Construct metadata including thinking_tokens --- //
+                        const metadata = { model_name, system_prompt, max_tokens, prompt_text, thinking_tokens };
                         console.log("Metadata for new response:", metadata);
                         // ------------------------
 
