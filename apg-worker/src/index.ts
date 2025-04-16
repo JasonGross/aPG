@@ -305,8 +305,9 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
     if (!supabase) return new Response(createErrorSSEEvent('Database connection not available.'), { status: 503, headers: { 'Content-Type': 'text/event-stream' } });
     if (!anthropic) return new Response(createErrorSSEEvent('LLM service not configured.'), { status: 503, headers: { 'Content-Type': 'text/event-stream' } });
 
-    // --- Get Prompt from Form Data ---
+    // --- Get Prompt and Thinking State from Form Data --- //
     let short_description = '';
+    let thinkingEnabled = true; // Default to true
     try {
         const formData = await request.formData();
         const promptValue = formData.get('prompt');
@@ -316,7 +317,11 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
         if (!short_description) {
             return new Response(createErrorSSEEvent('Prompt cannot be empty.'), { status: 400, headers: { 'Content-Type': 'text/event-stream' } });
         }
-        console.log("Received prompt (short_description):", short_description);
+        // Read thinking_enabled from form data
+        const thinkingEnabledParam = formData.get('thinking_enabled');
+        // Update thinkingEnabled based on param (only set to false if explicitly 'false')
+        thinkingEnabled = thinkingEnabledParam !== 'false';
+        console.log("Received prompt (short_description):", short_description, "Thinking enabled:", thinkingEnabled);
     } catch (e) {
         return new Response(createErrorSSEEvent('Failed to parse form data.'), { status: 400, headers: { 'Content-Type': 'text/event-stream' } });
     }
@@ -327,7 +332,8 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
     const system_prompt = env.LLM_SYSTEM_PROMPT1 + env.LLM_SYSTEM_PROMPT2 + env.LLM_SYSTEM_PROMPT3;
     const max_tokens = env.LLM_MAX_TOKENS ?? 1000;
     const prompt_template = env.LLM_PROMPT_TEMPLATE || 'Write an essay about {short_description}';
-    const thinking_tokens = env.LLM_THINKING_TOKENS ?? 0;
+    // --- Conditionally set thinking_tokens based on thinkingEnabled --- //
+    const thinking_tokens = thinkingEnabled ? (env.LLM_THINKING_TOKENS ?? 0) : 0;
     let prompt_text = '';
     try {
         prompt_text = prompt_template.replace('{short_description}', short_description);

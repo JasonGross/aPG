@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const essaysList = document.getElementById('essays-list');
     const sortButtons = document.querySelectorAll('.sort-button');
     const charCount = document.getElementById('char-count');
+    const thinkingCheckbox = document.getElementById('thinking-checkbox'); // Get the checkbox
 
     let currentSort = { field: 'time', order: 'desc' }; // Default sort
     let eventSource = null; // To hold the EventSource connection
@@ -28,6 +29,11 @@ document.addEventListener('DOMContentLoaded', () => {
             fetchEssays(); // Refresh essay list on success
         }
         console.log("UI finalized.");
+    }
+
+    // --- Helper: Generate Cache Key ---
+    function getCacheKey(prompt, thinkingEnabled) {
+        return `${prompt}|thinking=${thinkingEnabled}`;
     }
 
     // --- Helper: Render Raw Text to Formatted HTML ---
@@ -219,27 +225,30 @@ document.addEventListener('DOMContentLoaded', () => {
     promptForm.addEventListener('submit', async (event) => {
         event.preventDefault();
         const prompt = promptInput.value.trim();
+        const thinkingEnabled = thinkingCheckbox.checked;
         let rawFullResponseAccumulator = "";
 
         if (!prompt) return;
 
-        // Update URL
+        // --- Update URL with prompt and thinking state ---
         try {
             const url = new URL(window.location);
             url.searchParams.set('prompt', prompt);
-            history.pushState({ prompt: prompt }, '', url.toString());
+            url.searchParams.set('thinking', thinkingEnabled.toString()); // Add thinking state
+            history.pushState({ prompt: prompt, thinking: thinkingEnabled }, '', url.toString());
+            console.log("URL updated with prompt and thinking state:", url.toString());
         } catch (e) {
             console.error("Error updating URL on submit:", e);
         }
+        // ---------------------------------------------- //
 
-        // --- Check Cache ---
-        if (responseCache[prompt]) {
-            console.log("Loading response from cache for:", prompt);
-            const cachedData = responseCache[prompt];
-
-            // Check cache format (simple string vs object with text/metadata)
+        // --- Check Cache (using thinking state in key) ---
+        const cacheKey = getCacheKey(prompt, thinkingEnabled);
+        if (responseCache[cacheKey]) {
+            console.log("Loading response from cache for key:", cacheKey);
+            const cachedData = responseCache[cacheKey];
             const cachedRawText = typeof cachedData === 'string' ? cachedData : cachedData.text;
-            const cachedMetadata = typeof cachedData === 'object' ? cachedData.metadata : null; // Get metadata if available
+            const cachedMetadata = typeof cachedData === 'object' ? cachedData.metadata : null;
 
             if (cachedMetadata) {
                 console.log("Using cached metadata:", cachedMetadata);
@@ -266,7 +275,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         // --------------- //
 
-        console.log("Fetching response from backend for:", prompt);
+        console.log(`Fetching response from backend for: ${prompt}, Thinking: ${thinkingEnabled}`);
         // Reset title rendered flag for new request
         titleRendered = false;
         // Basic UI update for loading
@@ -288,9 +297,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch('https://apg-worker.jasongross9.workers.dev/ask', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded', // FastAPI Form expects this
+                    'Content-Type': 'application/x-www-form-urlencoded',
                 },
-                body: `prompt=${encodeURIComponent(prompt)}`
+                // --- Send prompt and thinking state to backend --- //
+                body: `prompt=${encodeURIComponent(prompt)}&thinking_enabled=${thinkingEnabled}`
             });
 
             if (!response.ok) {
@@ -312,8 +322,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         console.log("Stream complete.");
                         // Cache the RAW response and metadata on successful completion
                         if (!errorMessage.textContent) { // Check if an error message was displayed during stream
-                            responseCache[prompt] = { text: rawFullResponseAccumulator, metadata: receivedMetadata || {} };
-                            console.log("Response and metadata cached for:", prompt);
+                            responseCache[cacheKey] = { text: rawFullResponseAccumulator, metadata: receivedMetadata || {} }; // Use cacheKey
+                            console.log("Response and metadata cached for key:", cacheKey);
                             finalizeUI(true); // Finalize UI (will fetch essays)
                         } else {
                             finalizeUI(false); // Finalize UI but don't refresh list if errors occurred
@@ -380,8 +390,8 @@ document.addEventListener('DOMContentLoaded', () => {
                                     console.log("SSE Stream ended by server.");
                                     // Cache the RAW response and metadata on server end signal (if no prior error)
                                     if (!errorMessage.textContent) {
-                                        responseCache[prompt] = { text: rawFullResponseAccumulator, metadata: receivedMetadata || {} };
-                                        console.log("Response and metadata cached for:", prompt);
+                                        responseCache[cacheKey] = { text: rawFullResponseAccumulator, metadata: receivedMetadata || {} }; // Use cacheKey
+                                        console.log("Response and metadata cached for key:", cacheKey);
                                         finalizeUI(true); // Finalize UI
                                     } else {
                                         finalizeUI(false);
@@ -409,8 +419,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Handle non-streaming response
                 const rawText = await response.text();
                 // Cache raw text in the new object format, but without metadata
-                responseCache[prompt] = { text: rawText, metadata: null };
-                console.log("Non-streamed response cached (no metadata) for:", prompt);
+                responseCache[cacheKey] = { text: rawText, metadata: null }; // Use cacheKey
+                console.log("Non-streamed response cached (no metadata) for key:", cacheKey);
                 responseOutput.innerHTML = renderFormattedText(rawText); // Render formatted
                 finalizeUI(true); // Finalize UI
             }
@@ -454,12 +464,48 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // --- Handle Checkbox Change ---
+    thinkingCheckbox.addEventListener('change', () => {
+        const thinkingEnabled = thinkingCheckbox.checked;
+        console.log("Thinking checkbox changed to:", thinkingEnabled);
+        try {
+            const url = new URL(window.location);
+            url.searchParams.set('thinking', thinkingEnabled.toString());
+            // Use replaceState to update URL without adding a new history entry
+            history.replaceState(history.state, '', url.toString());
+            console.log("URL updated on checkbox change:", url.toString());
+        } catch (e) {
+            console.error("Error updating URL on checkbox change:", e);
+        }
+
+        // Optional: Clear cache for the current prompt as the result might change
+        // const currentPrompt = promptInput.value.trim();
+        // if (currentPrompt) {
+        //     const cacheKeyTrue = getCacheKey(currentPrompt, true);
+        //     const cacheKeyFalse = getCacheKey(currentPrompt, false);
+        //     delete responseCache[cacheKeyTrue];
+        //     delete responseCache[cacheKeyFalse];
+        //     console.log(`Cleared cache entries for prompt '${currentPrompt}' due to thinking change.`);
+        // }
+    });
+
     // --- Initial Load Logic ---
     function initializePage() {
         console.log("Initializing page...");
         // Check for URL parameters on initial load
         const urlParams = new URLSearchParams(window.location.search);
         const promptFromUrl = urlParams.get('prompt');
+        const thinkingFromUrl = urlParams.get('thinking'); // Get thinking state
+
+        // Set checkbox state based on URL param
+        if (thinkingFromUrl !== null) {
+            thinkingCheckbox.checked = thinkingFromUrl === 'true';
+            console.log(`Thinking checkbox set to ${thinkingCheckbox.checked} from URL.`);
+        } else {
+            console.log("No thinking state in URL, using default (checked).");
+            // Default is checked in HTML, so no action needed unless we want to force it
+            // thinkingCheckbox.checked = true;
+        }
 
         if (promptFromUrl) {
             console.log("Found prompt in URL:", promptFromUrl);
