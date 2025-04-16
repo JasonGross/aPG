@@ -464,6 +464,12 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                         metadata = { ...cachedParamsData, prompt_text: cachedPromptData.prompt_text }; // Combine fetched data
                     }
 
+                    // --- Truncate system_prompt in metadata --- //
+                    if (metadata.system_prompt && metadata.system_prompt.length > 100) {
+                        metadata.system_prompt = metadata.system_prompt.substring(0, 100) + '...';
+                    }
+                    // -------------------------------------------- //
+
                     console.log("Metadata for cached response:", metadata);
                     await writer.write({ metadata }); // Send metadata event first
                 } catch (metaError: any) {
@@ -556,7 +562,12 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
                         console.log("Anthropic stream finished successfully. Saving response...");
 
                         // --- Construct metadata including thinking_tokens --- //
-                        const metadata = { model_name, system_prompt, max_tokens, prompt_text, thinking_tokens };
+                        let metadata = { model_name, system_prompt, max_tokens, prompt_text, thinking_tokens };
+                        // --- Truncate system_prompt in metadata --- //
+                        if (metadata.system_prompt && metadata.system_prompt.length > 100) {
+                            metadata.system_prompt = metadata.system_prompt.substring(0, 100) + '...';
+                        }
+                        // -------------------------------------------- //
                         console.log("Metadata for new response:", metadata);
                         // ------------------------
 
