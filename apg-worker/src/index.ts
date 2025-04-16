@@ -11,7 +11,9 @@ export interface Env {
 
     // Non-secret vars
     LLM_MODEL_NAME: string;
-    LLM_SYSTEM_PROMPT: string;
+    LLM_SYSTEM_PROMPT1: string;
+    LLM_SYSTEM_PROMPT2: string;
+    LLM_SYSTEM_PROMPT3: string;
     LLM_MAX_TOKENS: number;
     LLM_PROMPT_TEMPLATE: string;
     LLM_THINKING_TOKENS: number;
@@ -322,7 +324,7 @@ async function handleAsk(request: Request, env: Env, supabase: SupabaseClient | 
 
     // --- Get LLM Config from Env ---
     const model_name = env.LLM_MODEL_NAME || 'claude-3-haiku-20240307'; // Default
-    const system_prompt = env.LLM_SYSTEM_PROMPT || '';
+    const system_prompt = env.LLM_SYSTEM_PROMPT1 + env.LLM_SYSTEM_PROMPT2 + env.LLM_SYSTEM_PROMPT3;
     const max_tokens = env.LLM_MAX_TOKENS ?? 1000;
     const prompt_template = env.LLM_PROMPT_TEMPLATE || 'Write an essay about {short_description}';
     const thinking_tokens = env.LLM_THINKING_TOKENS ?? 0;
